@@ -11,7 +11,7 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 BOT_TOKEN = "8966599896:AAHtq67RQAp_jDKYz37HPhwhZr0xnbqDCg8"
-OWNER_IDS = ["8407513032","8221493883"]
+OWNER_IDS = ["8950854926","8221493883"]
 
 SUPABASE_URL = "https://rnccpzqrjnwreigssxdg.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJuY2NwenFyam53cmVpZ3NzeGRnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEyNzczNjEsImV4cCI6MjEwNjg1MzM2MX0.4xOM3zS0i0tL1rUbriDLHjR_c3_PMribG68H1l0GvqM"
