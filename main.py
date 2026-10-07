@@ -13,8 +13,8 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 # =========================================================
 #         تنظیمات — همه‌چیز داخل کد
 # =========================================================
-BOT_TOKEN ="8642774262:AAERU6ZFPzyU3HmjgjFSVokKioHuDcBmSGg"
-OWNER_IDS = ["8221493883"]
+BOT_TOKEN = "8962767114:AAF2c14P9HQjckG6LN7ZjWsl67Ktt7ldrWY"
+OWNER_IDS = ["8407513032,8221493883"]
 
 # Supabase
 SUPABASE_URL = "https://rnccpzqrjnwreigssxdg.supabase.co"
