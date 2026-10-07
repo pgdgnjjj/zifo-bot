@@ -11,12 +11,11 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # =========================================================
-#         تنظیمات — همه‌چیز داخل کد
+#         تنظیمات
 # =========================================================
 BOT_TOKEN = "8962767114:AAF2c14P9HQjckG6LN7ZjWsl67Ktt7ldrWY"
 OWNER_IDS = ["8407513032,8221493883"]
 
-# Supabase
 SUPABASE_URL = "https://rnccpzqrjnwreigssxdg.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJuY2NwenFyam53cmVpZ3NzeGRnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEyNzczNjEsImV4cCI6MjEwNjg1MzM2MX0.4xOM3zS0i0tL1rUbriDLHjR_c3_PMribG68H1l0GvqM"
 
@@ -52,8 +51,9 @@ STATE_KEYS = [
     'awaiting_wallet_user', 'awaiting_wallet_amount', 'awaiting_add_admin',
     'awaiting_remove_admin', 'awaiting_broadcast', 'awaiting_card', 'awaiting_support',
     'awaiting_product_name', 'awaiting_product_price', 'awaiting_product_stock',
-    'awaiting_stock_increase', 'awaiting_stock_decrease', 'awaiting_user_check',
-    'awaiting_ban_toggle', 'new_product_name', 'new_product_price',
+    'awaiting_product_configs', 'awaiting_stock_increase', 'awaiting_stock_decrease',
+    'awaiting_user_check', 'awaiting_ban_toggle', 'awaiting_search_user',
+    'new_product_name', 'new_product_price', 'new_product_stock',
     'wallet_target', 'editing_product_id', 'awaiting_edit_product',
     'awaiting_increase_all', 'awaiting_decrease_all', 'topup_amount'
 ]
@@ -109,7 +109,7 @@ class DataManager:
             if response.data and len(response.data) > 0:
                 supabase.table("bot_data").update({"data": data}).eq("id", 1).execute()
             else:
-                supabase.table("bot_data").insert({"id": 1, "data": data}).execute()
+                supabase.table("bot_data").insert({"data": data}).execute()
         except Exception as e:
             logger.error(f"Supabase save error: {e}")
         self.data = data
@@ -175,6 +175,7 @@ class DataManager:
         product["id"] = new_id
         product.setdefault("stock", 0)
         product.setdefault("description", "")
+        product.setdefault("configs", [])  # ← کانفیگ‌ها
         product["created_at"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         self.data["products"].append(product)
         self.save_data()
@@ -421,9 +422,17 @@ async def product_details(upd, ctx, pid):
     if not p:
         await msg.reply_text("❌ یافت نشد.")
         return
-    text = f"🎯 **{p['name']}**\n💰 {fmt(p['price'])} تومان\n📦 موجودی: {p.get('stock', 0)}\n📝 {p.get('description', '---')}"
+    stock = p.get("stock", 0)
+    configs_count = len(p.get("configs", []))
+    text = (
+        f"🎯 **{p['name']}**\n"
+        f"💰 قیمت: {fmt(p['price'])} تومان\n"
+        f"📦 موجودی: {stock}\n"
+        f"🔑 کانفیگ آماده: {configs_count}\n"
+        f"📝 {p.get('description', '---')}"
+    )
     kb = []
-    if p.get("stock", 0) > 0:
+    if stock > 0:
         kb.append([InlineKeyboardButton("🛒 افزودن به سبد", callback_data=f"cartadd_{pid}")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="products_back")])
     markup = InlineKeyboardMarkup(kb)
@@ -704,8 +713,6 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s = dm.data.get("support_username", "@Zifo_support")
     await update.message.reply_text(f"📞 پشتیبانی: {s}", reply_markup=main_kb(update.effective_user.id))
-
-
 # =========================================================
 #                     پنل ادمین
 # =========================================================
@@ -728,6 +735,7 @@ async def admin_panel(upd, ctx):
             ["📈 افزایش موجودی", "📉 کسر موجودی"],
             ["💰 افزایش همگانی", "💸 کسر همگانی"],
             ["📋 سفارش‌ها", "📊 آمار ربات"],
+            ["👥 آمار کاربران", "🔍 جستجوی کاربر"],
             ["💰 درخواست‌های شارژ", "💰 کیف پول کاربر"],
             ["👤 بررسی کاربر", "🚫 مسدود/آزاد"],
             ["💳 شماره کارت", "🛠 پشتیبانی"],
@@ -741,6 +749,7 @@ async def admin_panel(upd, ctx):
             ["➕ افزودن محصول", "📦 مدیریت محصولات"],
             ["📈 افزایش موجودی", "📉 کسر موجودی"],
             ["📋 سفارش‌ها", "📊 آمار ربات"],
+            ["👥 آمار کاربران", "🔍 جستجوی کاربر"],
             ["💰 درخواست‌های شارژ", "💰 کیف پول کاربر"],
             ["👤 بررسی کاربر", "🚫 مسدود/آزاد"],
             ["🔙 بازگشت"]
@@ -775,6 +784,90 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ---------- آمار کاربران ----------
+async def show_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not dm.is_admin(update.effective_user.id):
+        return
+    users = dm.data["users"]
+    if not users:
+        await update.message.reply_text("📭 هیچ کاربری نیست.")
+        return
+
+    text = f"👥 **آمار کاربران** ({len(users)} نفر)\n\n"
+    for i, (uid, u) in enumerate(list(users.items())[-30:], 1):
+        name = u.get("first_name", "-") or "-"
+        username = u.get("username", "")
+        uname_str = f"@{username}" if username else "بدون یوزرنیم"
+        balance = u.get("balance", 0)
+        orders_count = len(u.get("orders", []))
+        text += (
+            f"{i}. 🆔 `{uid}`\n"
+            f"   📛 {name}\n"
+            f"   🔗 {uname_str}\n"
+            f"   💰 {fmt(balance)} ت | 📦 {orders_count} سفارش\n\n"
+        )
+
+    if len(users) > 30:
+        text += f"... و {len(users) - 30} کاربر دیگه"
+
+    # تقسیم پیام‌های طولانی
+    if len(text) > 4000:
+        text = text[:3900] + "\n\n... (لیست کوتاه شد)"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# ---------- جستجوی کاربر ----------
+async def search_user_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not dm.is_admin(update.effective_user.id):
+        return
+    clear_states(context)
+    context.user_data['awaiting_search_user'] = True
+    await update.message.reply_text(
+        "🔍 **جستجوی کاربر**\n"
+        "اسم، یوزرنیم یا آیدی عددی رو بنویس:\n"
+        "(برای انصراف /cancel)"
+    )
+
+
+async def handle_search_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_search_user'):
+        return
+    query = update.message.text.strip().lower().replace("@", "")
+    users = dm.data["users"]
+    found = []
+
+    for uid, u in users.items():
+        if (query in uid.lower() or
+            query in (u.get("username", "") or "").lower() or
+            query in (u.get("first_name", "") or "").lower()):
+            found.append((uid, u))
+
+    if not found:
+        await update.message.reply_text("❌ کاربری پیدا نشد.")
+        context.user_data.pop('awaiting_search_user', None)
+        return
+
+    text = f"🔍 **نتیجه جستجو** ({len(found)} کاربر)\n\n"
+    for i, (uid, u) in enumerate(found[:10], 1):
+        name = u.get("first_name", "-") or "-"
+        username = u.get("username", "")
+        uname_str = f"@{username}" if username else "ندارد"
+        balance = u.get("balance", 0)
+        orders_count = len(u.get("orders", []))
+        banned = "🚫" if dm.is_banned(uid) else "✅"
+        text += (
+            f"{i}. 🆔 `{uid}`\n"
+            f"   📛 {name} | 🔗 {uname_str}\n"
+            f"   💰 {fmt(balance)} ت | 📦 {orders_count}\n"
+            f"   وضعیت: {banned}\n\n"
+        )
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+    context.user_data.pop('awaiting_search_user', None)
+
+
+# ---------- افزودن محصول با کانفیگ ----------
 async def add_product_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_product_name'] = True
@@ -787,6 +880,7 @@ async def handle_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['awaiting_product_name'] = False
         context.user_data['awaiting_product_price'] = True
         await update.message.reply_text("💰 قیمت رو به تومان بنویس:")
+
     elif context.user_data.get('awaiting_product_price'):
         try:
             price = int(update.message.text)
@@ -797,20 +891,55 @@ async def handle_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['awaiting_product_price'] = False
         context.user_data['awaiting_product_stock'] = True
         await update.message.reply_text("📦 موجودی اولیه رو بنویس:")
+
     elif context.user_data.get('awaiting_product_stock'):
         try:
             stock = int(update.message.text)
         except ValueError:
             await update.message.reply_text("❌ عدد بفرست.")
             return
+        context.user_data['new_product_stock'] = stock
+        context.user_data['awaiting_product_stock'] = False
+        context.user_data['awaiting_product_configs'] = True
+        await update.message.reply_text(
+            "🔑 **کانفیگ‌ها رو بفرست**\n\n"
+            "هر کانفیگ تو یه خط جداگانه.\n"
+            "مثال:\n"
+            "`vless://xxx...`\n"
+            "`vless://yyy...`\n\n"
+            "اگه کانفیگ نداری، بنویس: `ندارم`"
+        )
+
+    elif context.user_data.get('awaiting_product_configs'):
+        configs_text = update.message.text.strip()
+        configs = []
+        if configs_text != "ندارم":
+            configs = [c.strip() for c in configs_text.split("\n") if c.strip()]
+
         name = context.user_data.get('new_product_name')
         price = context.user_data.get('new_product_price')
-        pid = dm.add_product({"name": name, "price": price, "stock": stock})
-        await update.message.reply_text(f"✅ محصول `{name}` اضافه شد (ID: {pid})")
+        stock = context.user_data.get('new_product_stock')
+
+        pid = dm.add_product({
+            "name": name,
+            "price": price,
+            "stock": stock,
+            "configs": configs
+        })
+
+        await update.message.reply_text(
+            f"✅ **محصول اضافه شد**\n\n"
+            f"📛 نام: {name}\n"
+            f"🆔 ID: {pid}\n"
+            f"💰 قیمت: {fmt(price)} ت\n"
+            f"📦 موجودی: {stock}\n"
+            f"🔑 کانفیگ: {len(configs)} عدد"
+        )
         clear_states(context)
         await admin_panel(update, context)
 
 
+# ---------- مدیریت محصولات ----------
 async def manage_products(upd, ctx):
     if isinstance(upd, CallbackQuery):
         msg = upd.message
@@ -823,8 +952,12 @@ async def manage_products(upd, ctx):
         return
     kb = []
     for p in products:
+        configs_count = len(p.get("configs", []))
         kb.append([
-            InlineKeyboardButton(f"✏️ {p['name']}", callback_data=f"editp_{p['id']}"),
+            InlineKeyboardButton(
+                f"✏️ {p['name']} ({p['stock']} | {configs_count} کانفیگ)",
+                callback_data=f"editp_{p['id']}"
+            ),
             InlineKeyboardButton("❌", callback_data=f"delp_{p['id']}")
         ])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")])
@@ -835,6 +968,24 @@ async def manage_products(upd, ctx):
         await msg.reply_text("📦 **مدیریت محصولات**", reply_markup=markup)
 
 
+async def delete_product_confirm(query: CallbackQuery, ctx, pid):
+    p = dm.get_product(pid)
+    if not p:
+        await query.answer("یافت نشد")
+        return
+    kb = [
+        [InlineKeyboardButton("✅ بله", callback_data=f"confirmdel_{pid}")],
+        [InlineKeyboardButton("❌ انصراف", callback_data="manage_products")]
+    ]
+    await query.edit_message_text(f"⚠️ حذف `{p['name']}` مطمئنی؟", reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def confirm_delete_product(query: CallbackQuery, ctx, pid):
+    dm.delete_product(pid)
+    await query.answer("حذف شد")
+    await manage_products(query, ctx)
+
+
 async def edit_product_prompt(query: CallbackQuery, ctx, pid):
     p = dm.get_product(pid)
     if not p:
@@ -843,10 +994,12 @@ async def edit_product_prompt(query: CallbackQuery, ctx, pid):
     clear_states(ctx)
     ctx.user_data['editing_product_id'] = pid
     ctx.user_data['awaiting_edit_product'] = True
+    configs_count = len(p.get("configs", []))
     await query.edit_message_text(
         f"✏️ ویرایش *{p['name']}*\n\n"
         f"اطلاعات جدید رو تو ۴ خط بفرست:\n"
-        f"نام\nقیمت\nموجودی\nتوضیحات"
+        f"نام\nقیمت\nموجودی\nتوضیحات\n\n"
+        f"🔑 کانفیگ‌های فعلی: {configs_count}"
     )
 
 
@@ -872,24 +1025,46 @@ async def handle_edit_product(update: Update, context: ContextTypes.DEFAULT_TYPE
     await admin_panel(update, context)
 
 
-async def delete_product_confirm(query: CallbackQuery, ctx, pid):
+# ---------- افزودن کانفیگ به محصول موجود ----------
+async def add_config_prompt(query: CallbackQuery, ctx, pid):
     p = dm.get_product(pid)
     if not p:
         await query.answer("یافت نشد")
         return
-    kb = [
-        [InlineKeyboardButton("✅ بله", callback_data=f"confirmdel_{pid}")],
-        [InlineKeyboardButton("❌ انصراف", callback_data="manage_products")]
-    ]
-    await query.edit_message_text(f"⚠️ حذف `{p['name']}` مطمئنی؟", reply_markup=InlineKeyboardMarkup(kb))
+    clear_states(ctx)
+    ctx.user_data['adding_config_pid'] = pid
+    ctx.user_data['awaiting_config_add'] = True
+    await query.edit_message_text(
+        f"🔑 **افزودن کانفیگ به {p['name']}**\n\n"
+        f"کانفیگ‌ها رو خط به خط بفرست:\n"
+        f"مثال:\n`vless://xxx`\n`vless://yyy`"
+    )
 
 
-async def confirm_delete_product(query: CallbackQuery, ctx, pid):
-    dm.delete_product(pid)
-    await query.answer("حذف شد")
-    await manage_products(query, ctx)
+async def handle_add_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_config_add'):
+        return
+    pid = context.user_data.get('adding_config_pid')
+    p = dm.get_product(pid)
+    if not p:
+        await update.message.reply_text("❌ محصول یافت نشد.")
+        clear_states(context)
+        return
+
+    new_configs = [c.strip() for c in update.message.text.strip().split("\n") if c.strip()]
+    p.setdefault("configs", [])
+    p["configs"].extend(new_configs)
+    dm.save_data()
+
+    await update.message.reply_text(
+        f"✅ {len(new_configs)} کانفیگ به `{p['name']}` اضافه شد.\n"
+        f"🔑 مجموع کانفیگ‌ها: {len(p['configs'])}"
+    )
+    clear_states(context)
+    await admin_panel(update, context)
 
 
+# ---------- موجودی ----------
 async def increase_stock_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_stock_increase'] = True
@@ -957,8 +1132,6 @@ async def handle_all_balance(update: Update, context: ContextTypes.DEFAULT_TYPE)
         n = dm.decrease_all(amount)
         await update.message.reply_text(f"✅ از {n} کاربر هر کدام {fmt(amount)} ت کسر شد.")
         context.user_data.pop('awaiting_decrease_all', None)
-
-
 # =========================================================
 #                     سفارش‌ها
 # =========================================================
@@ -1053,6 +1226,63 @@ async def approve_order_prompt(query: CallbackQuery, ctx, oid):
     if not o or o['status'] != 'waiting_admin':
         await query.answer("قابل تأیید نیست.")
         return
+
+    # چک کن اگه محصول کانفیگ آماده داره، خودکار بفرست
+    auto_configs = []
+    for item in o.get('items', []):
+        p = dm.get_product(item['id'])
+        if p and p.get('configs') and len(p['configs']) > 0:
+            auto_configs.append(p['configs'][0])
+
+    if auto_configs:
+        await query.edit_message_text(
+            f"📤 **تأیید سفارش `{oid}`**\n\n"
+            f"🔑 {len(auto_configs)} کانفیگ آماده تو دیتابیسه.\n"
+            f"می‌خوای خودکار بفرستی یا دستی؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🤖 ارسال خودکار کانفیگ", callback_data=f"autocfg_{oid}")],
+                [InlineKeyboardButton("✏️ ارسال دستی", callback_data=f"manualcfg_{oid}")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
+            ])
+        )
+    else:
+        clear_states(ctx)
+        ctx.user_data['sending_config_for'] = oid
+        await query.edit_message_text(f"📤 کانفیگ سفارش `{oid}` رو بفرست (متن/عکس/فایل):")
+
+
+async def send_config_auto(query: CallbackQuery, ctx, oid):
+    o = dm.get_order(oid)
+    if not o:
+        await query.answer("یافت نشد")
+        return
+
+    sent_configs = []
+    for item in o.get('items', []):
+        p = dm.get_product(item['id'])
+        if p and p.get('configs') and len(p['configs']) > 0:
+            cfg = p['configs'].pop(0)
+            sent_configs.append(cfg)
+            dm.save_data()
+
+    if not sent_configs:
+        await query.answer("❌ کانفیگ آماده نیست.", show_alert=True)
+        return
+
+    target = int(o['user_id'])
+    cfg_text = "\n\n".join(sent_configs)
+
+    try:
+        await ctx.bot.send_message(target, f"🎁 **سفارش {oid}**\n\n`{cfg_text}`", parse_mode="Markdown")
+        for it in o.get('items', []):
+            dm.adjust_stock(it['id'], -1)
+        dm.update_order(oid, {"status": "completed", "account_info": cfg_text})
+        await query.edit_message_text(f"✅ کانفیگ خودکار ارسال شد و سفارش `{oid}` تکمیل شد.")
+    except Exception as e:
+        await query.edit_message_text(f"❌ خطا: {e}")
+
+
+async def send_config_manual(query: CallbackQuery, ctx, oid):
     clear_states(ctx)
     ctx.user_data['sending_config_for'] = oid
     await query.edit_message_text(f"📤 کانفیگ سفارش `{oid}` رو بفرست (متن/عکس/فایل):")
@@ -1246,6 +1476,7 @@ async def handle_user_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ud = user_display(uid, u.get("username", ""))
     await update.message.reply_text(
         f"👤 **اطلاعات کاربر**\n\n{ud}\n"
+        f"📛 {u.get('first_name', '-')}\n"
         f"💰 موجودی: {fmt(u.get('balance', 0))} ت\n"
         f"📦 سفارشات: {len(u.get('orders', []))}\n"
         f"🚫 وضعیت: {'مسدود' if banned else 'فعال'}"
@@ -1306,8 +1537,6 @@ async def handle_wallet_admin(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"✅ موجودی `{uid}` شد {fmt(u['balance'])} ت")
         context.user_data.pop('wallet_target', None)
         context.user_data.pop('awaiting_wallet_amount', None)
-
-
 # =========================================================
 #                     تنظیمات / ادمین‌ها
 # =========================================================
@@ -1431,6 +1660,8 @@ async def delete_last_broadcast(update: Update, context: ContextTypes.DEFAULT_TY
     dm.data["broadcast_history"] = history
     dm.save_data()
     await update.message.reply_text(f"✅ از {deleted} کاربر حذف شد.")
+
+
 # =========================================================
 #                     Callback Router
 # =========================================================
@@ -1473,6 +1704,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await view_order_detail(query, context, data[7:])
         elif data.startswith("appr_"):
             await approve_order_prompt(query, context, data[5:])
+        elif data.startswith("autocfg_"):
+            await send_config_auto(query, context, data[8:])
+        elif data.startswith("manualcfg_"):
+            await send_config_manual(query, context, data[10:])
         elif data.startswith("rej_"):
             await reject_order(query, context, data[4:])
         elif data.startswith("vcfg_"):
@@ -1531,6 +1766,10 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await decrease_stock_prompt(update, context)
     elif text == "📊 آمار ربات":
         await admin_stats(update, context)
+    elif text == "👥 آمار کاربران":
+        await show_users_list(update, context)
+    elif text == "🔍 جستجوی کاربر":
+        await search_user_prompt(update, context)
     elif text == "💰 درخواست‌های شارژ":
         await show_topup_requests(update, context)
     elif text == "💰 کیف پول کاربر":
@@ -1585,11 +1824,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_edit_product'):
         await handle_edit_product(update, context)
         return
+    if context.user_data.get('awaiting_config_add'):
+        await handle_add_config(update, context)
+        return
     if context.user_data.get('awaiting_user_check'):
         await handle_user_check(update, context)
         return
     if context.user_data.get('awaiting_ban_toggle'):
         await handle_ban_toggle(update, context)
+        return
+    if context.user_data.get('awaiting_search_user'):
+        await handle_search_user(update, context)
         return
     if context.user_data.get('awaiting_wallet_user') or context.user_data.get('awaiting_wallet_amount'):
         await handle_wallet_admin(update, context)
@@ -1605,7 +1850,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if (context.user_data.get('awaiting_product_name') or
         context.user_data.get('awaiting_product_price') or
-        context.user_data.get('awaiting_product_stock')):
+        context.user_data.get('awaiting_product_stock') or
+        context.user_data.get('awaiting_product_configs')):
         await handle_add_product(update, context)
         return
     if context.user_data.get('awaiting_stock_increase') or context.user_data.get('awaiting_stock_decrease'):
@@ -1633,7 +1879,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-#                     Setup Application
+#                     Setup
 # =========================================================
 
 application = Application.builder().token(BOT_TOKEN).updater(None).build()
@@ -1642,11 +1888,6 @@ application.add_handler(CommandHandler("cancel", cancel))
 application.add_handler(CallbackQueryHandler(button_handler))
 application.add_handler(MessageHandler(filters.PHOTO, message_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-
-
-# =========================================================
-#                     Flask Webhook
-# =========================================================
 
 flask_app = Flask(__name__)
 
@@ -1699,10 +1940,6 @@ def set_webhook():
     except Exception as e:
         return f"❌ Error: {e}", 500
 
-
-# =========================================================
-#                     Launch
-# =========================================================
 
 if __name__ == "__main__":
     flask_app.run(host="0.0.0.0", port=PORT)
