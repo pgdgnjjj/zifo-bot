@@ -3,7 +3,7 @@ import os
 import logging
 import random
 import string
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Flask, request
 from supabase import create_client, Client
@@ -17,7 +17,7 @@ BOT_TOKEN = "8962767114:AAF2c14P9HQjckG6LN7ZjWsl67Ktt7ldrWY"
 OWNER_IDS = ["8407513032,8221493883"]
 
 SUPABASE_URL = "https://rnccpzqrjnwreigssxdg.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJuY2NwenFyam53cmVpZ3NzeGRnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEyNzczNjEsImV4cCI6MjEwNjg1MzM2MX0.4xOM3zS0i0tL1rUbriDLHjR_c3_PMribG68H1l0GvqM"
+SUPABASE_KEY = "کلید_anon_رو_اینجا_بذار"
 
 PORT = int(os.getenv("PORT", 8000))
 # =========================================================
@@ -58,17 +58,35 @@ STATE_KEYS = [
     'awaiting_product_configs', 'awaiting_stock_increase', 'awaiting_stock_decrease',
     'awaiting_user_check', 'awaiting_ban_toggle', 'awaiting_search_user',
     'awaiting_coupon_percent', 'awaiting_coupon_max', 'awaiting_coupon_code',
-    'awaiting_ref_bonus', 'awaiting_min_ref',
+    'awaiting_ref_bonus', 'awaiting_welcome_msg', 'awaiting_coupon_input',
+    'awaiting_order_track',
     'new_product_name', 'new_product_price', 'new_product_stock',
     'wallet_target', 'editing_product_id', 'awaiting_edit_product',
-    'awaiting_increase_all', 'awaiting_decrease_all', 'topup_amount',
-    'awaiting_coupon_input'
+    'awaiting_increase_all', 'awaiting_decrease_all', 'topup_amount'
 ]
 
 
 def clear_states(context):
     for k in STATE_KEYS:
         context.user_data.pop(k, None)
+
+
+async def send_long_message(update, text):
+    """ارسال پیام طولانی به صورت چند تیکه"""
+    max_len = 4000
+    if len(text) <= max_len:
+        await update.message.reply_text(text)
+        return
+    parts = []
+    while len(text) > max_len:
+        split_at = text.rfind('\n', 0, max_len)
+        if split_at == -1:
+            split_at = max_len
+        parts.append(text[:split_at])
+        text = text[split_at:]
+    parts.append(text)
+    for part in parts:
+        await update.message.reply_text(part)
 
 
 class DataManager:
@@ -86,6 +104,7 @@ class DataManager:
                 data.setdefault("coupons", {})
                 data.setdefault("referrals", {})
                 data.setdefault("ref_settings", {"bonus": 5000, "min_purchase": 0, "enabled": True})
+                data.setdefault("welcome_msg", "🌟 به فروشگاه Zifo خوش آمدید!")
                 data.setdefault("discount_cache", {})
                 self.data = data
                 return data
@@ -109,6 +128,7 @@ class DataManager:
             "coupons": {},
             "referrals": {},
             "ref_settings": {"bonus": 5000, "min_purchase": 0, "enabled": True},
+            "welcome_msg": "🌟 به فروشگاه Zifo خوش آمدید!",
             "discount_cache": {},
             "shop_status": {"is_open": True, "closed_message": "🚫 فروشگاه بسته است."}
         }
@@ -129,7 +149,6 @@ class DataManager:
             logger.error(f"Supabase save error: {e}")
         self.data = data
 
-    # ---------- کاربران ----------
     def get_user(self, uid):
         uid = str(uid)
         if uid not in self.data["users"]:
@@ -196,7 +215,6 @@ class DataManager:
             return True
         return False
 
-    # ---------- محصولات ----------
     def get_product(self, pid):
         return next((p for p in self.data["products"] if p["id"] == pid), None)
 
@@ -235,7 +253,6 @@ class DataManager:
             return True
         return False
 
-    # ---------- سفارش‌ها ----------
     def add_order(self, order):
         oid = gen_order_id()
         order["order_id"] = oid
@@ -257,7 +274,10 @@ class DataManager:
             return True
         return False
 
-    # ---------- شارژ ----------
+    def get_user_orders(self, uid):
+        uid = str(uid)
+        return [o for o in self.data["orders"] if o.get("user_id") == uid]
+
     def add_topup(self, req):
         rid = gen_req_id()
         req["request_id"] = rid
@@ -278,7 +298,6 @@ class DataManager:
             return True
         return False
 
-    # ---------- سبد ----------
     def add_to_cart(self, uid, pid):
         u = self.get_user(uid)
         p = self.get_product(pid)
@@ -309,7 +328,6 @@ class DataManager:
     def cart_items(self, uid):
         return self.get_user(uid)["cart"]
 
-    # ---------- همگانی ----------
     def increase_all(self, amount):
         n = 0
         for uid in self.data["users"]:
@@ -328,7 +346,6 @@ class DataManager:
         self.save_data()
         return n
 
-    # ---------- پیام همگانی ----------
     def add_broadcast(self, sent_msgs, text):
         self.data.setdefault("broadcast_history", [])
         self.data["broadcast_history"].append({
@@ -352,7 +369,6 @@ class DataManager:
             return removed
         return None
 
-    # ---------- کد تخفیف ----------
     def get_coupons(self):
         return self.data.get("coupons", {})
 
@@ -384,7 +400,6 @@ class DataManager:
                 return True
         return False
 
-    # ---------- رفرال ----------
     def get_ref_settings(self):
         return self.data.get("ref_settings", {"bonus": 5000, "min_purchase": 0, "enabled": True})
 
@@ -397,37 +412,50 @@ class DataManager:
         self.save_data()
 
     def process_referral(self, new_uid, ref_code):
-        """وقتی کاربر جدید با کد رفرال میاد"""
         settings = self.get_ref_settings()
         if not settings.get("enabled", True):
             return None
-
         inviter_uid, inviter = self.find_user_by_refcode(ref_code)
         if not inviter_uid or inviter_uid == new_uid:
             return None
-
         new_user = self.get_user(new_uid)
         if new_user.get("invited_by"):
             return None
-
         new_user["invited_by"] = inviter_uid
         inviter["invited_count"] = inviter.get("invited_count", 0) + 1
-
         bonus = settings.get("bonus", 5000)
         inviter["balance"] = inviter.get("balance", 0) + bonus
-
         self.save_data()
-        return {"inviter_uid": inviter_uid, "bonus": bonus, "inviter_name": inviter.get("first_name", "")}
+        return {"inviter_uid": inviter_uid, "bonus": bonus}
+
+    def get_daily_stats(self, days=7):
+        result = []
+        today = datetime.now().date()
+        for i in range(days - 1, -1, -1):
+            day = today - timedelta(days=i)
+            day_str = day.strftime('%Y-%m-%d')
+            orders = [o for o in self.data["orders"]
+                      if o.get("date", "").startswith(day_str) and o.get("status") == "completed"]
+            revenue = sum(o["total"] for o in orders)
+            result.append({
+                "date": day_str,
+                "orders": len(orders),
+                "revenue": revenue
+            })
+        return result
 
 
 dm = DataManager()
 
 
-async def safe_edit(message, text, markup=None):
+async def safe_edit(message, text, markup=None, reply_markup=None):
+    """تابع اصلاح‌شده که هم markup و هم reply_markup رو قبول می‌کنه"""
+    final_markup = reply_markup or markup
     try:
-        await message.edit_text(text, reply_markup=markup)
+        await message.edit_text(text, reply_markup=final_markup)
     except Exception as e:
-        if "not modified" not in str(e).lower():
+        err = str(e).lower()
+        if "not modified" not in err and "message to edit" not in err:
             logger.error(f"edit err: {e}")
 
 
@@ -443,6 +471,7 @@ def main_kb(uid):
         ["🛍️ محصولات"],
         ["🛒 سبد خرید", "👤 حساب کاربری"],
         ["💰 کیف پول", "🎁 دعوت دوستان"],
+        ["📜 سفارش‌های من", "🔍 پیگیری سفارش"],
         ["ℹ️ راهنما", "📞 پشتیبانی"]
     ]
     if dm.is_admin(uid):
@@ -465,7 +494,8 @@ async def main_menu(upd, ctx):
     if dm.is_banned(uid):
         await msg.reply_text("🚫 مسدود هستی.")
         return
-    await msg.reply_text("🌟 **به فروشگاه Zifo خوش آمدید!**", reply_markup=main_kb(uid))
+    welcome = dm.data.get("welcome_msg", "🌟 به فروشگاه Zifo خوش آمدید!")
+    await msg.reply_text(welcome, reply_markup=main_kb(uid))
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -473,7 +503,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = str(user.id)
 
-    # پردازش رفرال
     if context.args and len(context.args) > 0:
         ref_code = context.args[0]
         result = dm.process_referral(uid, ref_code)
@@ -563,10 +592,7 @@ async def product_details(upd, ctx, pid):
         kb.append([InlineKeyboardButton("🛒 افزودن به سبد", callback_data=f"cartadd_{pid}")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="products_back")])
     markup = InlineKeyboardMarkup(kb)
-    try:
-        await safe_edit(msg, text, reply_markup=markup)
-    except Exception as e:
-        logger.error(f"product_details error: {e}")
+    await safe_edit(msg, text, reply_markup=markup)
 
 
 async def add_to_cart_cb(upd, ctx, pid):
@@ -579,12 +605,13 @@ async def add_to_cart_cb(upd, ctx, pid):
         user = upd.effective_user
     p = dm.get_product(pid)
     if not p or p.get("stock", 0) <= 0:
-        await msg.reply_text("❌ ناموجود.")
+        await answer_cb(upd, "❌ ناموجود")
         return
     if dm.add_to_cart(str(user.id), pid):
-        await msg.reply_text(f"✅ {p['name']} به سبد اضافه شد.")
+        await answer_cb(upd, f"✅ {p['name']} اضافه شد")
+        await show_cart(upd, ctx)
     else:
-        await msg.reply_text("⚠️ قبلاً در سبد هست.")
+        await answer_cb(upd, "⚠️ قبلاً در سبد هست")
 
 
 # =========================================================
@@ -592,7 +619,6 @@ async def add_to_cart_cb(upd, ctx, pid):
 # =========================================================
 
 async def show_cart(upd, ctx):
-    clear_states(ctx)
     if isinstance(upd, CallbackQuery):
         msg = upd.message
         user = upd.from_user
@@ -605,10 +631,7 @@ async def show_cart(upd, ctx):
     if not cart:
         text = "🛒 **سبد خرید خالی است.**"
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🛍️ محصولات", callback_data="products_back")]])
-        if isinstance(upd, CallbackQuery):
-            await safe_edit(msg, text, reply_markup=kb)
-        else:
-            await msg.reply_text(text, reply_markup=kb)
+        await safe_edit(msg, text, reply_markup=kb)
         return
     total = dm.cart_total(uid)
     text = "🛒 **سبد خرید:**\n\n"
@@ -618,7 +641,8 @@ async def show_cart(upd, ctx):
 
     discount = ctx.user_data.get('applied_discount')
     if discount:
-        text += f"\n🎟️ تخفیف: {discount['percent']}%"
+        new_total = int(total * (100 - discount['percent']) / 100)
+        text += f"\n🎟️ تخفیف: {discount['percent']}%\n💰 **مبلغ نهایی:** {fmt(new_total)} ت"
 
     kb = []
     for i, it in enumerate(cart):
@@ -630,25 +654,26 @@ async def show_cart(upd, ctx):
         InlineKeyboardButton("🗑️ خالی کردن", callback_data="clearcart")
     ])
     markup = InlineKeyboardMarkup(kb)
-    if isinstance(upd, CallbackQuery):
-        await safe_edit(msg, text, reply_markup=markup)
-    else:
-        await msg.reply_text(text, reply_markup=markup)
+    await safe_edit(msg, text, reply_markup=markup)
 
 
 async def remove_cart_item(upd, ctx, idx):
-    user = upd.from_user if isinstance(upd, CallbackQuery) else upd.effective_user
     if isinstance(upd, CallbackQuery):
+        user = upd.from_user
         await answer_cb(upd)
+    else:
+        user = upd.effective_user
     uid = str(user.id)
     dm.remove_from_cart(uid, idx)
     await show_cart(upd, ctx)
 
 
 async def clear_cart(upd, ctx):
-    user = upd.from_user if isinstance(upd, CallbackQuery) else upd.effective_user
     if isinstance(upd, CallbackQuery):
+        user = upd.from_user
         await answer_cb(upd)
+    else:
+        user = upd.effective_user
     dm.clear_cart(str(user.id))
     await show_cart(upd, ctx)
 
@@ -673,30 +698,22 @@ async def checkout(upd, ctx):
         total = int(total * (100 - discount['percent']) / 100)
 
     bal = dm.get_user(uid).get("balance", 0)
-    card = dm.data["card_number"]
     if bal < total:
-        await msg.reply_text(f"❌ موجودی کافی نیست.\n💰 موجودی: {fmt(bal)} ت\n💰 نیاز: {fmt(total)} ت")
+        text = f"❌ **موجودی کافی نیست**\n💰 موجودی: {fmt(bal)} ت\n💰 نیاز: {fmt(total)} ت"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💰 شارژ کیف پول", callback_data="request_topup")]])
+        await safe_edit(msg, text, reply_markup=kb)
         return
-    text = (
-        f"✅ **نهایی کردن خرید**\n━━━━━━━━━━\n"
-        f"📦 تعداد: {len(cart)}\n"
-    )
+
+    text = f"✅ **نهایی کردن خرید**\n━━━━━━━━━━\n📦 تعداد: {len(cart)}\n"
     if discount:
         text += f"🎟️ تخفیف: {discount['percent']}%\n"
-    text += (
-        f"💰 مبلغ نهایی: {fmt(total)} ت\n"
-        f"💳 موجودی: {fmt(bal)} ت\n"
-        f"━━━━━━━━━━\nمطمئنی؟"
-    )
+    text += f"💰 مبلغ نهایی: {fmt(total)} ت\n💳 موجودی: {fmt(bal)} ت\n━━━━━━━━━━\nمطمئنی؟"
     kb = [
         [InlineKeyboardButton("✅ بله، پرداخت", callback_data="pay_wallet")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="show_cart")]
     ]
     markup = InlineKeyboardMarkup(kb)
-    if isinstance(upd, CallbackQuery):
-        await safe_edit(msg, text, reply_markup=markup)
-    else:
-        await msg.reply_text(text, reply_markup=markup)
+    await safe_edit(msg, text, reply_markup=markup)
 
 
 async def pay_wallet(upd, ctx):
@@ -742,7 +759,8 @@ async def pay_wallet(upd, ctx):
 
     ud = user_display(uid, u.get("username", ""))
     items_str = "\n".join(f"{i['name']} - {fmt(i['price'])} ت" for i in cart)
-    await msg.reply_text(f"✅ **پرداخت موفق**\n🆔 سفارش: `{oid}`\n💰 {fmt(total)} ت\n\nمنتظر تأیید ادمین باش.")
+    text = f"✅ **پرداخت موفق**\n🆔 سفارش: `{oid}`\n💰 {fmt(total)} ت\n\nمنتظر تأیید ادمین باش."
+    await safe_edit(msg, text)
     for aid in dm.data["owners"] + dm.data["admins"]:
         try:
             await ctx.bot.send_message(int(aid), f"🛒 **سفارش جدید**\n🆔 `{oid}`\n👤 {ud}\n📦 {items_str}\n💰 {fmt(total)} ت")
@@ -781,7 +799,7 @@ async def handle_coupon_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     context.user_data['applied_discount'] = {"code": code, "percent": c["percent"]}
     context.user_data.pop('awaiting_coupon_input', None)
-    await update.message.reply_text(f"✅ کد تخفیف *{c['percent']}%* اعمال شد.", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ کد تخفیف {c['percent']}% اعمال شد.")
     await show_cart(update, context)
 
 
@@ -805,10 +823,7 @@ async def wallet_menu(upd, ctx):
         [InlineKeyboardButton("🔙 بازگشت", callback_data="back_menu")]
     ]
     markup = InlineKeyboardMarkup(kb)
-    if isinstance(upd, CallbackQuery):
-        await safe_edit(msg, text, reply_markup=markup)
-    else:
-        await msg.reply_text(text, reply_markup=markup)
+    await safe_edit(msg, text, reply_markup=markup)
 
 
 async def request_topup_start(upd, ctx):
@@ -835,7 +850,7 @@ async def handle_topup_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
         await main_menu(update, context)
         return True
     if not text.isdigit():
-        await update.message.reply_text("❌ عدد معتبر بفرست.\nبرای انصراف /cancel")
+        await update.message.reply_text("❌ عدد معتبر بفرست.")
         return True
     amount = int(text)
     if amount <= 0:
@@ -846,7 +861,7 @@ async def handle_topup_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data['awaiting_topup_receipt'] = True
     card = dm.data.get("card_number", "6037997599999999")
     await update.message.reply_text(
-        f"📸 تصویر رسید واریز *{fmt(amount)}* تومان رو بفرست.\n"
+        f"📸 تصویر رسید واریز {fmt(amount)} تومان رو بفرست.\n"
         f"💳 کارت: `{card}`\n(برای انصراف /cancel)"
     )
     return True
@@ -903,10 +918,6 @@ async def show_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# =========================================================
-#                     دعوت دوستان (رفرال)
-# =========================================================
-
 async def show_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = str(user.id)
@@ -931,15 +942,71 @@ async def show_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"🎁 **دعوت دوستان**\n\n"
-        f"با دعوت هر دوست، *{fmt(bonus)}* تومان هدیه بگیر!\n\n"
+        f"با دعوت هر دوست، {fmt(bonus)} تومان هدیه بگیر!\n\n"
         f"🔗 **لینک دعوت تو:**\n"
-        f"`{link}`\n\n"
+        f"{link}\n\n"
         f"📊 **آمار تو:**\n"
         f"👥 دعوت‌شده‌ها: {invited}\n"
-        f"💰 مجموع درآمد: {fmt(total_earned)} ت\n\n"
-        f"کافیه لینک رو برای دوستات بفرستی."
+        f"💰 مجموع درآمد: {fmt(total_earned)} ت"
     )
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_kb(uid))
+    await update.message.reply_text(text, reply_markup=main_kb(uid))
+
+
+async def show_my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    uid = str(user.id)
+    orders = dm.get_user_orders(uid)
+    if not orders:
+        await update.message.reply_text("📭 هنوز سفارشی نداری.")
+        return
+    orders = sorted(orders, key=lambda x: x.get("date", ""), reverse=True)[:10]
+    text = "📜 آخرین سفارش‌های شما:\n\n"
+    for o in orders:
+        status_emoji = {
+            "waiting_admin": "⏳ در انتظار",
+            "completed": "✅ تکمیل شده",
+            "rejected": "❌ رد شده"
+        }.get(o.get("status"), "❓")
+        text += (
+            f"{status_emoji}\n"
+            f"کد: {o['order_id']}\n"
+            f"مبلغ: {fmt(o['total'])} ت | تاریخ: {o.get('date', '')[:10]}\n\n"
+        )
+    await send_long_message(update, text)
+
+
+async def track_order_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clear_states(context)
+    context.user_data['awaiting_order_track'] = True
+    await update.message.reply_text("🔍 **پیگیری سفارش**\nکد سفارش رو بنویس:")
+
+
+async def handle_track_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_order_track'):
+        return
+    oid = update.message.text.strip()
+    o = dm.get_order(oid)
+    if not o:
+        await update.message.reply_text("❌ سفارش با این کد پیدا نشد.")
+        context.user_data.pop('awaiting_order_track', None)
+        return
+
+    status_text = {
+        "waiting_admin": "⏳ در انتظار تأیید ادمین",
+        "completed": "✅ تکمیل شده",
+        "rejected": "❌ رد شده"
+    }.get(o.get("status"), "❓ نامشخص")
+
+    items_str = "\n".join(f"• {i['name']}" for i in o.get("items", []))
+    text = (
+        f"🔍 سفارش {oid}\n\n"
+        f"📌 وضعیت: {status_text}\n"
+        f"💰 مبلغ: {fmt(o['total'])} ت\n"
+        f"📅 تاریخ: {o.get('date', '')}\n\n"
+        f"📦 محصولات:\n{items_str}"
+    )
+    await update.message.reply_text(text, reply_markup=main_kb(update.effective_user.id))
+    context.user_data.pop('awaiting_order_track', None)
 
 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -976,8 +1043,9 @@ async def admin_panel(upd, ctx):
             ["💰 درخواست‌های شارژ", "💰 کیف پول کاربر"],
             ["👤 بررسی کاربر", "🚫 مسدود/آزاد"],
             ["🎟️ کد تخفیف", "🎁 تنظیمات رفرال"],
-            ["💳 شماره کارت", "🛠 پشتیبانی"],
-            ["👥 لیست ادمین‌ها", "➕ افزودن ادمین", "➖ حذف ادمین"],
+            ["💳 مدیریت کارت‌ها", "🛠 پشتیبانی"],
+            ["📝 پیام خوش‌آمد", "📈 آمار فروش"],
+            ["👥 لیست ادمین‌ها", "➕ ادمین", "➖ ادمین"],
             ["🛒 باز/بستن فروشگاه"],
             ["📢 پیام همگانی", "🗑️ حذف آخرین پیام"],
             ["🔙 بازگشت"]
@@ -1005,7 +1073,7 @@ async def toggle_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if new:
         await update.message.reply_text("✅ فروشگاه باز شد.")
     else:
-        await update.message.reply_text(f"🔒 فروشگاه بسته شد.\n{cur['closed_message']}")
+        await update.message.reply_text(f"🔒 فروشگاه بسته شد.")
 
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1029,6 +1097,50 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ---------- آمار فروش روزانه ----------
+async def show_daily_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not dm.is_owner(update.effective_user.id):
+        return
+    stats = dm.get_daily_stats(7)
+    text = "📈 آمار فروش ۷ روز اخیر:\n\n"
+    total_orders = 0
+    total_revenue = 0
+    for s in stats:
+        text += f"📅 {s['date']}\n"
+        text += f"   🛒 {s['orders']} سفارش | 💰 {fmt(s['revenue'])} ت\n\n"
+        total_orders += s['orders']
+        total_revenue += s['revenue']
+    text += f"━━━━━━━━━━\n"
+    text += f"📊 مجموع: {total_orders} سفارش\n"
+    text += f"💰 درآمد کل: {fmt(total_revenue)} ت"
+    await update.message.reply_text(text)
+
+
+# ---------- پیام خوش‌آمد ----------
+async def welcome_msg_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not dm.is_owner(update.effective_user.id):
+        return
+    clear_states(context)
+    context.user_data['awaiting_welcome_msg'] = True
+    current = dm.data.get("welcome_msg", "")
+    await update.message.reply_text(
+        f"📝 **تغییر پیام خوش‌آمد**\n\n"
+        f"پیام فعلی:\n{current}\n\n"
+        f"پیام جدید رو بنویس:"
+    )
+
+
+async def handle_welcome_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_welcome_msg'):
+        return
+    new_msg = update.message.text
+    dm.data["welcome_msg"] = new_msg
+    dm.save_data()
+    await update.message.reply_text("✅ پیام خوش‌آمد تغییر کرد.")
+    clear_states(context)
+    await admin_panel(update, context)
+
+
 # ---------- آمار کاربران ----------
 async def show_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dm.is_admin(update.effective_user.id):
@@ -1038,7 +1150,7 @@ async def show_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 هیچ کاربری نیست.")
         return
 
-    text = f"👥 **آمار کاربران** ({len(users)} نفر)\n\n"
+    text = f"👥 آمار کاربران ({len(users)} نفر)\n\n"
     for i, (uid, u) in enumerate(list(users.items())[-30:], 1):
         name = u.get("first_name", "-") or "-"
         username = u.get("username", "")
@@ -1046,19 +1158,16 @@ async def show_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance = u.get("balance", 0)
         orders_count = len(u.get("orders", []))
         text += (
-            f"{i}. 🆔 `{uid}`\n"
-            f"   📛 {name}\n"
-            f"   🔗 {uname_str}\n"
-            f"   💰 {fmt(balance)} ت | 📦 {orders_count} سفارش\n\n"
+            f"{i}. ID: {uid}\n"
+            f"   نام: {name}\n"
+            f"   یوزرنیم: {uname_str}\n"
+            f"   موجودی: {fmt(balance)} ت | سفارش: {orders_count}\n\n"
         )
 
     if len(users) > 30:
         text += f"... و {len(users) - 30} کاربر دیگه"
 
-    if len(text) > 4000:
-        text = text[:3900] + "\n\n... (لیست کوتاه شد)"
-
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await send_long_message(update, text)
 
 
 async def search_user_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1087,7 +1196,7 @@ async def handle_search_user(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop('awaiting_search_user', None)
         return
 
-    text = f"🔍 **نتیجه جستجو** ({len(found)} کاربر)\n\n"
+    text = f"🔍 نتیجه جستجو ({len(found)} کاربر)\n\n"
     for i, (uid, u) in enumerate(found[:10], 1):
         name = u.get("first_name", "-") or "-"
         username = u.get("username", "")
@@ -1096,17 +1205,204 @@ async def handle_search_user(update: Update, context: ContextTypes.DEFAULT_TYPE)
         orders_count = len(u.get("orders", []))
         banned = "🚫" if dm.is_banned(uid) else "✅"
         text += (
-            f"{i}. 🆔 `{uid}`\n"
-            f"   📛 {name} | 🔗 {uname_str}\n"
-            f"   💰 {fmt(balance)} ت | 📦 {orders_count}\n"
+            f"{i}. ID: {uid}\n"
+            f"   نام: {name} | {uname_str}\n"
+            f"   موجودی: {fmt(balance)} ت | سفارش: {orders_count}\n"
             f"   وضعیت: {banned}\n\n"
         )
 
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await send_long_message(update, text)
     context.user_data.pop('awaiting_search_user', None)
 
 
-# ---------- افزودن محصول ----------
+# =========================================================
+#                     مدیریت کارت‌ها
+# =========================================================
+
+def get_cards():
+    """لیست کارت‌ها رو برمی‌گردونه (سازگار با نسخه قدیمی)"""
+    data = dm.data
+    if "cards" not in data or not isinstance(data.get("cards"), list):
+        # تبدیل card_number قدیمی به لیست
+        old = data.get("card_number", "")
+        cards = []
+        if old:
+            cards.append({"number": old, "holder": "صاحب کارت", "active": True})
+        data["cards"] = cards
+        dm.save_data()
+    return data["cards"]
+
+
+def get_active_card():
+    """کارت فعال رو برمی‌گردونه"""
+    cards = get_cards()
+    for c in cards:
+        if c.get("active"):
+            return c
+    if cards:
+        return cards[0]
+    return {"number": "6037997599999999", "holder": "پیش‌فرض"}
+
+
+async def cards_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not dm.is_owner(update.effective_user.id):
+        return
+    cards = get_cards()
+    text = "💳 **مدیریت کارت‌های بانکی**\n\n"
+    if not cards:
+        text += "❌ هیچ کارتی ثبت نشده."
+    else:
+        for i, c in enumerate(cards, 1):
+            status = "✅ فعال" if c.get("active") else "⚪ غیرفعال"
+            text += f"{i}. `{c['number']}`\n"
+            text += f"   👤 {c.get('holder', '-')}\n"
+            text += f"   {status}\n\n"
+
+    kb = [
+        [InlineKeyboardButton("➕ افزودن کارت", callback_data="card_add")],
+        [InlineKeyboardButton("🗑️ حذف کارت", callback_data="card_del_menu")],
+        [InlineKeyboardButton("🔄 تغییر کارت فعال", callback_data="card_activate_menu")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
+    ]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def add_card_prompt(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+    clear_states(ctx)
+    ctx.user_data['awaiting_card_number'] = True
+    await msg.reply_text(
+        "💳 **افزودن کارت جدید**\n\n"
+        "شماره کارت رو بنویس (۱۶ رقم):\n"
+        "مثال: `6037997512345678`"
+    )
+
+
+async def handle_add_card_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_card_number'):
+        return
+    number = update.message.text.strip().replace("-", "").replace(" ", "")
+    if not number.isdigit() or len(number) != 16:
+        await update.message.reply_text("❌ شماره کارت باید ۱۶ رقم باشه.")
+        return
+    context.user_data['new_card_number'] = number
+    context.user_data['awaiting_card_number'] = False
+    context.user_data['awaiting_card_holder'] = True
+    await update.message.reply_text("👤 نام صاحب کارت رو بنویس:")
+
+
+async def handle_add_card_holder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_card_holder'):
+        return
+    holder = update.message.text.strip()
+    number = context.user_data.get('new_card_number')
+
+    cards = get_cards()
+    is_first = len(cards) == 0
+    cards.append({
+        "number": number,
+        "holder": holder,
+        "active": is_first
+    })
+    dm.data["cards"] = cards
+    dm.save_data()
+
+    await update.message.reply_text(
+        f"✅ کارت اضافه شد\n\n"
+        f"💳 `{number}`\n"
+        f"👤 {holder}\n"
+        f"{'✅ این کارت فعال شد' if is_first else ''}"
+    )
+    clear_states(context)
+    await admin_panel(update, context)
+
+
+async def del_card_menu(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+    cards = get_cards()
+    if not cards:
+        await msg.reply_text("❌ هیچ کارتی نیست.")
+        return
+    kb = []
+    for i, c in enumerate(cards):
+        kb.append([InlineKeyboardButton(
+            f"🗑️ حذف {c['number'][-4:]} ({c.get('holder', '-')})",
+            callback_data=f"card_del_{i}"
+        )])
+    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="card_menu")])
+    await msg.reply_text("کدوم کارت رو حذف کنم؟", reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def del_card_execute(upd, ctx, idx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+    cards = get_cards()
+    if 0 <= idx < len(cards):
+        removed = cards.pop(idx)
+        if removed.get("active") and cards:
+            cards[0]["active"] = True
+        dm.data["cards"] = cards
+        dm.save_data()
+        await msg.reply_text(f"✅ کارت `{removed['number'][-4:]}` حذف شد.")
+    else:
+        await msg.reply_text("❌ کارت پیدا نشد.")
+    await cards_menu(msg, ctx)
+
+
+async def activate_card_menu(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+    cards = get_cards()
+    if not cards:
+        await msg.reply_text("❌ هیچ کارتی نیست.")
+        return
+    kb = []
+    for i, c in enumerate(cards):
+        status = "✅" if c.get("active") else "⚪"
+        kb.append([InlineKeyboardButton(
+            f"{status} {c['number'][-4:]} ({c.get('holder', '-')})",
+            callback_data=f"card_act_{i}"
+        )])
+    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="card_menu")])
+    await msg.reply_text("کدوم کارت رو فعال کنم؟", reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def activate_card_execute(upd, ctx, idx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+    cards = get_cards()
+    if 0 <= idx < len(cards):
+        for i, c in enumerate(cards):
+            c["active"] = (i == idx)
+        dm.data["cards"] = cards
+        dm.save_data()
+        await msg.reply_text(f"✅ کارت `{cards[idx]['number'][-4:]}` فعال شد.")
+    else:
+        await msg.reply_text("❌ کارت پیدا نشد.")
+    await cards_menu(msg, ctx)
+
+
+# =========================================================
+#                     افزودن محصول
+# =========================================================
+
 async def add_product_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_product_name'] = True
@@ -1141,8 +1437,7 @@ async def handle_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(
             "🔑 **کانفیگ‌ها رو بفرست**\n\n"
             "هر کانفیگ تو یه خط جداگانه.\n"
-            "مثال:\n`vless://xxx`\n`vless://yyy`\n\n"
-            "اگه کانفیگ نداری، بنویس: `ندارم`"
+            "اگه نداری، بنویس: `ندارم`"
         )
     elif context.user_data.get('awaiting_product_configs'):
         configs_text = update.message.text.strip()
@@ -1163,15 +1458,19 @@ async def handle_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         await update.message.reply_text(
             f"✅ **محصول اضافه شد**\n\n"
-            f"📛 نام: {name}\n"
+            f"📛 {name}\n"
             f"🆔 ID: {pid}\n"
-            f"💰 قیمت: {fmt(price)} ت\n"
+            f"💰 {fmt(price)} ت\n"
             f"📦 موجودی: {stock}\n"
-            f"🔑 کانفیگ: {len(configs)} عدد"
+            f"🔑 کانفیگ: {len(configs)}"
         )
         clear_states(context)
         await admin_panel(update, context)
 
+
+# =========================================================
+#                     مدیریت محصولات
+# =========================================================
 
 async def manage_products(upd, ctx):
     if isinstance(upd, CallbackQuery):
@@ -1188,17 +1487,14 @@ async def manage_products(upd, ctx):
         configs_count = len(p.get("configs", []))
         kb.append([
             InlineKeyboardButton(
-                f"✏️ {p['name']} ({p['stock']} | {configs_count} کانفیگ)",
+                f"✏️ {p['name']} ({p['stock']} | {configs_count}cfg)",
                 callback_data=f"editp_{p['id']}"
             ),
             InlineKeyboardButton("❌", callback_data=f"delp_{p['id']}")
         ])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")])
     markup = InlineKeyboardMarkup(kb)
-    if isinstance(upd, CallbackQuery):
-        await safe_edit(msg, "📦 **مدیریت محصولات**", reply_markup=markup)
-    else:
-        await msg.reply_text("📦 **مدیریت محصولات**", reply_markup=markup)
+    await safe_edit(msg, "📦 **مدیریت محصولات**", reply_markup=markup)
 
 
 async def delete_product_confirm(query: CallbackQuery, ctx, pid):
@@ -1210,7 +1506,7 @@ async def delete_product_confirm(query: CallbackQuery, ctx, pid):
         [InlineKeyboardButton("✅ بله", callback_data=f"confirmdel_{pid}")],
         [InlineKeyboardButton("❌ انصراف", callback_data="manage_products")]
     ]
-    await query.edit_message_text(f"⚠️ حذف `{p['name']}` مطمئنی؟", reply_markup=InlineKeyboardMarkup(kb))
+    await query.edit_message_text(f"⚠️ حذف {p['name']} مطمئنی؟", reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def confirm_delete_product(query: CallbackQuery, ctx, pid):
@@ -1231,11 +1527,10 @@ async def edit_product_prompt(query: CallbackQuery, ctx, pid):
         [InlineKeyboardButton("🔙 بازگشت", callback_data="manage_products")]
     ]
     await query.edit_message_text(
-        f"✏️ **{p['name']}**\n\n"
-        f"💰 قیمت: {fmt(p['price'])} ت\n"
+        f"✏️ {p['name']}\n\n"
+        f"💰 {fmt(p['price'])} ت\n"
         f"📦 موجودی: {p['stock']}\n"
-        f"🔑 کانفیگ: {configs_count} عدد\n\n"
-        f"چی کار کنم؟",
+        f"🔑 کانفیگ: {configs_count}",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
@@ -1249,9 +1544,8 @@ async def edit_product_info_prompt(query: CallbackQuery, ctx, pid):
     ctx.user_data['editing_product_id'] = pid
     ctx.user_data['awaiting_edit_product'] = True
     await query.edit_message_text(
-        f"✏️ ویرایش *{p['name']}*\n\n"
-        f"اطلاعات جدید رو تو ۴ خط بفرست:\n"
-        f"نام\nقیمت\nموجودی\nتوضیحات"
+        f"✏️ ویرایش {p['name']}\n\n"
+        f"۴ خط بفرست:\nنام\nقیمت\nموجودی\nتوضیحات"
     )
 
 
@@ -1261,7 +1555,7 @@ async def handle_edit_product(update: Update, context: ContextTypes.DEFAULT_TYPE
     pid = context.user_data.get('editing_product_id')
     lines = update.message.text.strip().split('\n')
     if len(lines) < 4:
-        await update.message.reply_text("❌ حداقل ۴ خط بفرست.")
+        await update.message.reply_text("❌ حداقل ۴ خط.")
         return
     name = lines[0].strip()
     try:
@@ -1285,10 +1579,7 @@ async def add_config_prompt(query: CallbackQuery, ctx, pid):
     clear_states(ctx)
     ctx.user_data['adding_config_pid'] = pid
     ctx.user_data['awaiting_config_add'] = True
-    await query.edit_message_text(
-        f"🔑 **افزودن کانفیگ به {p['name']}**\n\n"
-        f"کانفیگ‌ها رو خط به خط بفرست:"
-    )
+    await query.edit_message_text(f"🔑 افزودن کانفیگ به {p['name']}\n\nهر کانفیگ خط به خط:")
 
 
 async def handle_add_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1304,32 +1595,28 @@ async def handle_add_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p.setdefault("configs", [])
     p["configs"].extend(new_configs)
     dm.save_data()
-    await update.message.reply_text(
-        f"✅ {len(new_configs)} کانفیگ اضافه شد.\n"
-        f"🔑 مجموع: {len(p['configs'])}"
-    )
+    await update.message.reply_text(f"✅ {len(new_configs)} کانفیگ اضافه شد. مجموع: {len(p['configs'])}")
     clear_states(context)
     await admin_panel(update, context)
 
 
-# ---------- موجودی ----------
 async def increase_stock_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_stock_increase'] = True
-    await update.message.reply_text("📈 **افزایش موجودی**\nبنویس: `product_id amount`\nمثال: `1 50`")
+    await update.message.reply_text("📈 **افزایش موجودی**\n`product_id amount`\nمثال: `1 50`")
 
 
 async def decrease_stock_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_stock_decrease'] = True
-    await update.message.reply_text("📉 **کسر موجودی**\nبنویس: `product_id amount`\nمثال: `1 10`")
+    await update.message.reply_text("📉 **کسر موجودی**\n`product_id amount`\nمثال: `1 10`")
 
 
 async def handle_stock_change(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_stock_increase') or context.user_data.get('awaiting_stock_decrease'):
         parts = update.message.text.split()
         if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
-            await update.message.reply_text("❌ فرمت اشتباه. مثال: `1 50`")
+            await update.message.reply_text("❌ مثال: `1 50`")
             return
         pid = int(parts[0])
         amount = int(parts[1])
@@ -1342,18 +1629,17 @@ async def handle_stock_change(update: Update, context: ContextTypes.DEFAULT_TYPE
             dm.adjust_stock(pid, amount)
         else:
             dm.adjust_stock(pid, -amount)
-        await update.message.reply_text(f"✅ موجودی {p['name']} شد: {dm.get_product(pid)['stock']}")
+        await update.message.reply_text(f"✅ موجودی {p['name']}: {dm.get_product(pid)['stock']}")
         clear_states(context)
         await admin_panel(update, context)
 
 
-# ---------- همگانی ----------
 async def increase_all_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dm.is_owner(update.effective_user.id):
         return
     clear_states(context)
     context.user_data['awaiting_increase_all'] = True
-    await update.message.reply_text("💰 مبلغ افزایش همگانی رو بنویس:")
+    await update.message.reply_text("💰 مبلغ افزایش همگانی:")
 
 
 async def decrease_all_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1361,29 +1647,29 @@ async def decrease_all_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     clear_states(context)
     context.user_data['awaiting_decrease_all'] = True
-    await update.message.reply_text("💸 مبلغ کسر همگانی رو بنویس:")
+    await update.message.reply_text("💸 مبلغ کسر همگانی:")
 
 
 async def handle_all_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = int(update.message.text.strip())
         if amount <= 0:
-            await update.message.reply_text("❌ عدد مثبت بفرست.")
-            return
+            raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ عدد بفرست.")
+        await update.message.reply_text("❌ عدد مثبت بفرست.")
         return
     if context.user_data.get('awaiting_increase_all'):
         n = dm.increase_all(amount)
-        await update.message.reply_text(f"✅ {n} کاربر هر کدام {fmt(amount)} ت گرفتند.")
+        await update.message.reply_text(f"✅ {n} کاربر هر کدام {fmt(amount)} ت")
         context.user_data.pop('awaiting_increase_all', None)
     elif context.user_data.get('awaiting_decrease_all'):
         n = dm.decrease_all(amount)
-        await update.message.reply_text(f"✅ از {n} کاربر هر کدام {fmt(amount)} ت کسر شد.")
+        await update.message.reply_text(f"✅ از {n} کاربر {fmt(amount)} ت کسر شد")
         context.user_data.pop('awaiting_decrease_all', None)
+# =========================================================
+#                     کد تخفیف ادمین
+# =========================================================
 
-
-# ---------- کد تخفیف ادمین ----------
 async def coupon_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dm.is_owner(update.effective_user.id):
         return
@@ -1410,7 +1696,7 @@ async def add_coupon_prompt(upd, ctx):
         msg = upd.message
     clear_states(ctx)
     ctx.user_data['awaiting_coupon_percent'] = True
-    await msg.reply_text("🎟️ **کد تخفیف جدید**\nدرصد تخفیف رو بنویس (1-99):")
+    await msg.reply_text("🎟️ درصد تخفیف (1-99):")
 
 
 async def handle_add_coupon(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1420,7 +1706,7 @@ async def handle_add_coupon(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if percent < 1 or percent > 99:
                 raise ValueError
         except ValueError:
-            await update.message.reply_text("❌ عدد بین 1 تا 99 بفرست.")
+            await update.message.reply_text("❌ 1 تا 99.")
             return
         context.user_data['coupon_percent'] = percent
         context.user_data['awaiting_coupon_percent'] = False
@@ -1435,7 +1721,7 @@ async def handle_add_coupon(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['coupon_max'] = max_uses
         context.user_data['awaiting_coupon_max'] = False
         context.user_data['awaiting_coupon_code'] = True
-        await update.message.reply_text("🔤 کد تخفیف رو بنویس (مثلاً `ZIFO20`):")
+        await update.message.reply_text("🔤 کد تخفیف رو بنویس:")
     elif context.user_data.get('awaiting_coupon_code'):
         code = update.message.text.strip().upper()
         percent = context.user_data.get('coupon_percent')
@@ -1454,7 +1740,7 @@ async def del_coupon_prompt(upd, ctx):
         msg = upd.message
     clear_states(ctx)
     ctx.user_data['awaiting_coupon_delete'] = True
-    await msg.reply_text("🗑️ کد تخفیف مورد نظر رو بنویس:")
+    await msg.reply_text("🗑️ کد تخفیف مورد نظر:")
 
 
 async def handle_del_coupon(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1469,7 +1755,10 @@ async def handle_del_coupon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await admin_panel(update, context)
 
 
-# ---------- تنظیمات رفرال ----------
+# =========================================================
+#                     تنظیمات رفرال
+# =========================================================
+
 async def ref_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dm.is_owner(update.effective_user.id):
         return
@@ -1477,7 +1766,6 @@ async def ref_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"🎁 **تنظیمات رفرال**\n\n"
         f"💰 پاداش هر دعوت: {fmt(s.get('bonus', 5000))} ت\n"
-        f"🛒 حداقل خرید: {fmt(s.get('min_purchase', 0))} ت\n"
         f"🔘 وضعیت: {'✅ فعال' if s.get('enabled', True) else '❌ غیرفعال'}"
     )
     kb = [
@@ -1496,7 +1784,7 @@ async def set_ref_bonus_prompt(upd, ctx):
         msg = upd.message
     clear_states(ctx)
     ctx.user_data['awaiting_ref_bonus'] = True
-    await msg.reply_text("💰 پاداش هر دعوت رو به تومان بنویس:")
+    await msg.reply_text("💰 پاداش هر دعوت به تومان:")
 
 
 async def handle_set_ref_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1511,7 +1799,7 @@ async def handle_set_ref_bonus(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     s = dm.get_ref_settings()
     dm.set_ref_settings(bonus, s.get('min_purchase', 0), s.get('enabled', True))
-    await update.message.reply_text(f"✅ پاداش به {fmt(bonus)} ت تغییر کرد.")
+    await update.message.reply_text(f"✅ پاداش: {fmt(bonus)} ت")
     clear_states(context)
     await admin_panel(update, context)
 
@@ -1526,6 +1814,8 @@ async def toggle_ref(upd, ctx):
     dm.set_ref_settings(s.get('bonus', 5000), s.get('min_purchase', 0), not s.get('enabled', True))
     new_s = dm.get_ref_settings()
     await msg.reply_text(f"✅ رفرال {'فعال' if new_s['enabled'] else 'غیرفعال'} شد.")
+
+
 # =========================================================
 #                     سفارش‌ها
 # =========================================================
@@ -1550,27 +1840,16 @@ async def show_orders_by_status(upd, ctx, statuses):
     orders = sorted(orders, key=lambda x: x.get("date", ""), reverse=True)
     if not orders:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
-        if isinstance(upd, CallbackQuery):
-            await safe_edit(msg, "📭 سفارشی نیست.", reply_markup=kb)
-        else:
-            await msg.reply_text("📭 سفارشی نیست.", reply_markup=kb)
+        await safe_edit(msg, "📭 سفارشی نیست.", reply_markup=kb)
         return
     kb = []
     for o in orders[:20]:
         kb.append([InlineKeyboardButton(f"#{o['order_id']} | {fmt(o['total'])} ت", callback_data=f"orddet_{o['order_id']}")])
     kb.append([InlineKeyboardButton("🗑️ خالی کردن", callback_data=f"clrord_{'_'.join(statuses)}")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")])
-    if "waiting_admin" in statuses:
-        title = "📥 سفارش‌های در انتظار"
-    elif "completed" in statuses:
-        title = "✅ سفارش‌های تکمیل شده"
-    else:
-        title = "❌ سفارش‌های رد شده"
+    title = "📥 در انتظار" if "waiting_admin" in statuses else ("✅ تکمیل" if "completed" in statuses else "❌ رد")
     markup = InlineKeyboardMarkup(kb)
-    if isinstance(upd, CallbackQuery):
-        await safe_edit(msg, f"**{title}**", reply_markup=markup)
-    else:
-        await msg.reply_text(f"**{title}**", reply_markup=markup)
+    await safe_edit(msg, title, reply_markup=markup)
 
 
 async def clear_orders(query: CallbackQuery, ctx, statuses_str):
@@ -1634,8 +1913,7 @@ async def approve_order_prompt(query: CallbackQuery, ctx, oid):
     if auto_configs:
         await query.edit_message_text(
             f"📤 **تأیید سفارش `{oid}`**\n\n"
-            f"🔑 {len(auto_configs)} کانفیگ آماده تو دیتابیسه.\n"
-            f"می‌خوای خودکار بفرستی یا دستی؟",
+            f"🔑 {len(auto_configs)} کانفیگ آماده تو دیتابیسه.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🤖 ارسال خودکار", callback_data=f"autocfg_{oid}")],
                 [InlineKeyboardButton("✏️ ارسال دستی", callback_data=f"manualcfg_{oid}")],
@@ -1645,7 +1923,7 @@ async def approve_order_prompt(query: CallbackQuery, ctx, oid):
     else:
         clear_states(ctx)
         ctx.user_data['sending_config_for'] = oid
-        await query.edit_message_text(f"📤 کانفیگ سفارش `{oid}` رو بفرست (متن/عکس/فایل):")
+        await query.edit_message_text(f"📤 کانفیگ سفارش `{oid}` رو بفرست:")
 
 
 async def send_config_auto(query: CallbackQuery, ctx, oid):
@@ -1661,7 +1939,7 @@ async def send_config_auto(query: CallbackQuery, ctx, oid):
             sent_configs.append(cfg)
             dm.save_data()
     if not sent_configs:
-        await query.answer("❌ کانفیگ آماده نیست.", show_alert=True)
+        await query.answer("❌ کانفیگ نیست.", show_alert=True)
         return
     target = int(o['user_id'])
     cfg_text = "\n\n".join(sent_configs)
@@ -1670,7 +1948,7 @@ async def send_config_auto(query: CallbackQuery, ctx, oid):
         for it in o.get('items', []):
             dm.adjust_stock(it['id'], -1)
         dm.update_order(oid, {"status": "completed", "account_info": cfg_text})
-        await query.edit_message_text(f"✅ کانفیگ خودکار ارسال شد و سفارش `{oid}` تکمیل شد.")
+        await query.edit_message_text(f"✅ ارسال شد.")
     except Exception as e:
         await query.edit_message_text(f"❌ خطا: {e}")
 
@@ -1678,7 +1956,7 @@ async def send_config_auto(query: CallbackQuery, ctx, oid):
 async def send_config_manual(query: CallbackQuery, ctx, oid):
     clear_states(ctx)
     ctx.user_data['sending_config_for'] = oid
-    await query.edit_message_text(f"📤 کانفیگ سفارش `{oid}` رو بفرست (متن/عکس/فایل):")
+    await query.edit_message_text(f"📤 کانفیگ سفارش `{oid}` رو بفرست:")
 
 
 async def send_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1702,7 +1980,7 @@ async def send_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for it in o.get('items', []):
             dm.adjust_stock(it['id'], -1)
         dm.update_order(oid, {"status": "completed", "account_info": cfg})
-        await update.message.reply_text(f"✅ کانفیگ ارسال شد و سفارش `{oid}` تکمیل شد.")
+        await update.message.reply_text(f"✅ کانفیگ ارسال شد.")
         context.user_data.pop('sending_config_for', None)
     except Exception as e:
         logger.error(f"Config send err: {e}")
@@ -1734,7 +2012,7 @@ async def reject_order(query: CallbackQuery, ctx, oid):
         try:
             await ctx.bot.send_message(
                 int(o['user_id']),
-                f"❌ سفارش `{oid}` رد شد.\n💰 {fmt(o['total'])} ت برگشت به کیف پول."
+                f"❌ سفارش `{oid}` رد شد.\n💰 {fmt(o['total'])} ت برگشت."
             )
         except Exception:
             pass
@@ -1756,10 +2034,7 @@ async def show_topup_requests(upd, ctx):
     pending = [r for r in dm.data["topup_requests"] if r.get("status") == "pending"]
     if not pending:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
-        if isinstance(upd, CallbackQuery):
-            await safe_edit(msg, "📭 درخواستی نیست.", reply_markup=kb)
-        else:
-            await msg.reply_text("📭 درخواستی نیست.", reply_markup=kb)
+        await safe_edit(msg, "📭 درخواستی نیست.", reply_markup=kb)
         return
     kb = []
     for r in pending[:20]:
@@ -1767,10 +2042,7 @@ async def show_topup_requests(upd, ctx):
     kb.append([InlineKeyboardButton("🗑️ خالی کردن", callback_data="clrtop")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")])
     markup = InlineKeyboardMarkup(kb)
-    if isinstance(upd, CallbackQuery):
-        await safe_edit(msg, "💰 **درخواست‌های شارژ**", reply_markup=markup)
-    else:
-        await msg.reply_text("💰 **درخواست‌های شارژ**", reply_markup=markup)
+    await safe_edit(msg, "💰 **درخواست‌های شارژ**", reply_markup=markup)
 
 
 async def clear_topups(query: CallbackQuery, ctx):
@@ -1794,8 +2066,7 @@ async def view_topup_detail(query: CallbackQuery, ctx, rid):
         f"🆔 `{r['request_id']}`\n"
         f"👤 {ud}\n"
         f"💰 {fmt(r['amount'])} ت\n"
-        f"📅 {r.get('date', '')}\n"
-        f"📌 {r.get('status', 'pending')}"
+        f"📅 {r.get('date', '')}"
     )
     kb = [
         [InlineKeyboardButton("✅ تأیید", callback_data=f"apprtop_{rid}"),
@@ -1807,10 +2078,7 @@ async def view_topup_detail(query: CallbackQuery, ctx, rid):
             await query.message.delete()
         except Exception:
             pass
-        await ctx.bot.send_photo(
-            query.message.chat_id, r['receipt_photo'],
-            caption=text, reply_markup=InlineKeyboardMarkup(kb)
-        )
+        await ctx.bot.send_photo(query.message.chat_id, r['receipt_photo'], caption=text, reply_markup=InlineKeyboardMarkup(kb))
     else:
         await safe_edit(query.message, text, reply_markup=InlineKeyboardMarkup(kb))
 
@@ -1826,10 +2094,7 @@ async def approve_topup(query: CallbackQuery, ctx, rid):
     dm.update_topup(rid, {"status": "approved"})
     await query.answer("تأیید شد")
     try:
-        await ctx.bot.send_message(
-            int(r['user_id']),
-            f"✅ شارژ تأیید شد.\n💰 {fmt(r['amount'])} ت اضافه شد."
-        )
+        await ctx.bot.send_message(int(r['user_id']), f"✅ شارژ تأیید شد.\n💰 {fmt(r['amount'])} ت")
     except Exception:
         pass
     await show_topup_requests(query, ctx)
@@ -1850,13 +2115,13 @@ async def reject_topup(query: CallbackQuery, ctx, rid):
 
 
 # =========================================================
-#                     بررسی کاربر / بن / کیف پول
+#                     کاربر / بن / کیف پول
 # =========================================================
 
 async def user_check_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_user_check'] = True
-    await update.message.reply_text("👤 شناسه عددی کاربر رو بنویس:")
+    await update.message.reply_text("👤 شناسه کاربر:")
 
 
 async def handle_user_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1868,12 +2133,12 @@ async def handle_user_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     banned = dm.is_banned(uid)
     ud = user_display(uid, u.get("username", ""))
     await update.message.reply_text(
-        f"👤 **اطلاعات کاربر**\n\n{ud}\n"
+        f"👤 {ud}\n"
         f"📛 {u.get('first_name', '-')}\n"
-        f"💰 موجودی: {fmt(u.get('balance', 0))} ت\n"
-        f"📦 سفارشات: {len(u.get('orders', []))}\n"
-        f"🎁 دعوت‌شده‌ها: {u.get('invited_count', 0)}\n"
-        f"🚫 وضعیت: {'مسدود' if banned else 'فعال'}"
+        f"💰 {fmt(u.get('balance', 0))} ت\n"
+        f"📦 {len(u.get('orders', []))} سفارش\n"
+        f"🎁 {u.get('invited_count', 0)} دعوت\n"
+        f"🚫 {'مسدود' if banned else 'فعال'}"
     )
     context.user_data.pop('awaiting_user_check', None)
 
@@ -1881,67 +2146,56 @@ async def handle_user_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ban_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_ban_toggle'] = True
-    await update.message.reply_text("🚫 شناسه عددی کاربر رو بنویس:")
+    await update.message.reply_text("🚫 شناسه کاربر:")
 
 
 async def handle_ban_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.text.strip()
     if not uid.isdigit():
-        await update.message.reply_text("❌ عدد بفرست.")
+        await update.message.reply_text("❌ عدد.")
         return
     if dm.is_banned(uid):
         dm.unban(uid)
-        await update.message.reply_text(f"✅ کاربر `{uid}` آزاد شد.")
+        await update.message.reply_text(f"✅ آزاد شد.")
     else:
         dm.ban(uid)
-        await update.message.reply_text(f"🚫 کاربر `{uid}` مسدود شد.")
+        await update.message.reply_text(f"🚫 مسدود شد.")
     context.user_data.pop('awaiting_ban_toggle', None)
 
 
 async def wallet_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_wallet_user'] = True
-    await update.message.reply_text("💰 شناسه عددی کاربر رو بنویس:")
+    await update.message.reply_text("💰 شناسه کاربر:")
 
 
 async def handle_wallet_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_wallet_user'):
         uid = update.message.text.strip()
         if not uid.isdigit():
-            await update.message.reply_text("❌ عدد بفرست.")
+            await update.message.reply_text("❌ عدد.")
             return
         context.user_data['wallet_target'] = uid
         context.user_data['awaiting_wallet_user'] = False
         context.user_data['awaiting_wallet_amount'] = True
         u = dm.get_user(uid)
-        await update.message.reply_text(
-            f"موجودی فعلی: {fmt(u.get('balance', 0))} ت\n"
-            f"مبلغ تغییر (مثبت یا منفی) رو بنویس:"
-        )
+        await update.message.reply_text(f"موجودی: {fmt(u.get('balance', 0))} ت\nمبلغ (مثبت/منفی):")
     elif context.user_data.get('awaiting_wallet_amount'):
         try:
             amount = int(update.message.text.strip())
         except ValueError:
-            await update.message.reply_text("❌ عدد بفرست.")
+            await update.message.reply_text("❌ عدد.")
             return
         uid = context.user_data.get('wallet_target')
         u = dm.get_user(uid)
         u['balance'] = max(0, u.get('balance', 0) + amount)
         dm.save_data()
-        await update.message.reply_text(f"✅ موجودی `{uid}` شد {fmt(u['balance'])} ت")
+        await update.message.reply_text(f"✅ {fmt(u['balance'])} ت")
         context.user_data.pop('wallet_target', None)
         context.user_data.pop('awaiting_wallet_amount', None)
 # =========================================================
 #                     تنظیمات
 # =========================================================
-
-async def set_card_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not dm.is_owner(update.effective_user.id):
-        return
-    clear_states(context)
-    context.user_data['awaiting_card'] = True
-    await update.message.reply_text("💳 شماره کارت جدید رو بفرست:")
-
 
 async def set_support_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dm.is_owner(update.effective_user.id):
@@ -1952,12 +2206,7 @@ async def set_support_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get('awaiting_card'):
-        dm.data["card_number"] = update.message.text.strip()
-        dm.save_data()
-        await update.message.reply_text("✅ شماره کارت ثبت شد.")
-        context.user_data.pop('awaiting_card', None)
-    elif context.user_data.get('awaiting_support'):
+    if context.user_data.get('awaiting_support'):
         dm.data["support_username"] = update.message.text.strip()
         dm.save_data()
         await update.message.reply_text("✅ پشتیبانی ثبت شد.")
@@ -1967,10 +2216,9 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     owners = dm.data["owners"]
     admins = dm.data["admins"]
-    await update.message.reply_text(
-        f"👑 **مالکین:**\n" + "\n".join(owners) +
-        f"\n\n🛡 **ادمین‌ها:**\n" + ("\n".join(admins) if admins else "هیچ")
-    )
+    text = "👑 مالکین:\n" + "\n".join(owners) + "\n\n🛡 ادمین‌ها:\n"
+    text += "\n".join(admins) if admins else "هیچ"
+    await update.message.reply_text(text)
 
 
 async def add_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1978,7 +2226,7 @@ async def add_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     clear_states(context)
     context.user_data['awaiting_add_admin'] = True
-    await update.message.reply_text("➕ شناسه عددی ادمین جدید:")
+    await update.message.reply_text("➕ شناسه ادمین جدید:")
 
 
 async def remove_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1986,20 +2234,20 @@ async def remove_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     clear_states(context)
     context.user_data['awaiting_remove_admin'] = True
-    await update.message.reply_text("➖ شناسه عددی ادمین:")
+    await update.message.reply_text("➖ شناسه ادمین:")
 
 
 async def handle_admin_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.text.strip()
     if context.user_data.get('awaiting_add_admin'):
         if dm.add_admin(uid):
-            await update.message.reply_text(f"✅ `{uid}` ادمین شد.")
+            await update.message.reply_text(f"✅ {uid} ادمین شد.")
         else:
             await update.message.reply_text("❌ از قبل ادمینه.")
         context.user_data.pop('awaiting_add_admin', None)
     elif context.user_data.get('awaiting_remove_admin'):
         if dm.remove_admin(uid):
-            await update.message.reply_text(f"✅ `{uid}` حذف شد.")
+            await update.message.reply_text(f"✅ {uid} حذف شد.")
         else:
             await update.message.reply_text("❌ ادمین نیست.")
         context.user_data.pop('awaiting_remove_admin', None)
@@ -2014,7 +2262,7 @@ async def broadcast_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     clear_states(context)
     context.user_data['awaiting_broadcast'] = True
-    await update.message.reply_text("📢 متن پیام همگانی رو بفرست:\n(برای انصراف /cancel)")
+    await update.message.reply_text("📢 متن پیام همگانی:\n(برای انصراف /cancel)")
 
 
 async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2063,13 +2311,14 @@ async def delete_last_broadcast(update: Update, context: ContextTypes.DEFAULT_TY
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
-    logger.info(f"CALLBACK: {data} from {query.from_user.id}")
+    logger.info(f"CALLBACK: {data}")
 
     try:
         if not data:
-            await query.answer("❌ داده خالیه", show_alert=True)
+            await query.answer("❌ داده خالیه")
             return
 
+        # منو
         if data == "back_menu":
             await main_menu(query, context)
         elif data == "admin_back":
@@ -2092,21 +2341,52 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await request_topup_start(query, context)
         elif data == "apply_coupon":
             await apply_coupon_prompt(query, context)
+
+        # کد تخفیف
         elif data == "add_coupon":
             await add_coupon_prompt(query, context)
         elif data == "del_coupon":
             await del_coupon_prompt(query, context)
+
+        # رفرال
         elif data == "set_ref_bonus":
             await set_ref_bonus_prompt(query, context)
         elif data == "toggle_ref":
             await toggle_ref(query, context)
+
+        # کارت‌ها
+        elif data == "card_menu":
+            await cards_menu(query, context)
+        elif data == "card_add":
+            await add_card_prompt(query, context)
+        elif data == "card_del_menu":
+            await del_card_menu(query, context)
+        elif data == "card_activate_menu":
+            await activate_card_menu(query, context)
+        elif data.startswith("card_del_"):
+            await del_card_execute(query, context, int(data.split("_")[2]))
+        elif data.startswith("card_act_"):
+            await activate_card_execute(query, context, int(data.split("_")[2]))
+
+        # محصولات
         elif data.startswith("prod_"):
-            pid = int(data.split("_")[1])
-            await product_details(query, context, pid)
+            await product_details(query, context, int(data.split("_")[1]))
         elif data.startswith("cartadd_"):
             await add_to_cart_cb(query, context, int(data.split("_")[1]))
         elif data.startswith("cartdel_"):
             await remove_cart_item(query, context, int(data.split("_")[1]))
+        elif data.startswith("editp_"):
+            await edit_product_prompt(query, context, int(data.split("_")[1]))
+        elif data.startswith("editinfo_"):
+            await edit_product_info_prompt(query, context, int(data.split("_")[1]))
+        elif data.startswith("addcfg_"):
+            await add_config_prompt(query, context, int(data.split("_")[1]))
+        elif data.startswith("delp_"):
+            await delete_product_confirm(query, context, int(data.split("_")[1]))
+        elif data.startswith("confirmdel_"):
+            await confirm_delete_product(query, context, int(data.split("_")[1]))
+
+        # سفارش‌ها
         elif data.startswith("orddet_"):
             await view_order_detail(query, context, data[7:])
         elif data.startswith("appr_"):
@@ -2119,24 +2399,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await reject_order(query, context, data[4:])
         elif data.startswith("vcfg_"):
             await view_config(query, context, data[5:])
-        elif data.startswith("editp_"):
-            await edit_product_prompt(query, context, int(data.split("_")[1]))
-        elif data.startswith("editinfo_"):
-            await edit_product_info_prompt(query, context, int(data.split("_")[1]))
-        elif data.startswith("addcfg_"):
-            await add_config_prompt(query, context, int(data.split("_")[1]))
-        elif data.startswith("delp_"):
-            await delete_product_confirm(query, context, int(data.split("_")[1]))
-        elif data.startswith("confirmdel_"):
-            await confirm_delete_product(query, context, int(data.split("_")[1]))
-        elif data.startswith("topdet_"):
-            await view_topup_detail(query, context, data[7:])
-        elif data.startswith("apprtop_"):
-            await approve_topup(query, context, data[7:])
-        elif data.startswith("rejtop_"):
-            await reject_topup(query, context, data[7:])
-        elif data == "clrtop":
-            await clear_topups(query, context)
         elif data == "ord_waiting":
             await show_orders_by_status(query, context, ['waiting_admin'])
         elif data == "ord_completed":
@@ -2145,17 +2407,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_orders_by_status(query, context, ['rejected'])
         elif data.startswith("clrord_"):
             await clear_orders(query, context, data[7:])
+
+        # شارژ
+        elif data.startswith("topdet_"):
+            await view_topup_detail(query, context, data[7:])
+        elif data.startswith("apprtop_"):
+            await approve_topup(query, context, data[7:])
+        elif data.startswith("rejtop_"):
+            await reject_topup(query, context, data[7:])
+        elif data == "clrtop":
+            await clear_topups(query, context)
+
         else:
             logger.warning(f"UNKNOWN CALLBACK: {data}")
-            await query.answer(f"❌ نامعتبر: {data}", show_alert=True)
+            await query.answer(f"❌ نامعتبر", show_alert=True)
 
     except Exception as e:
         logger.error(f"Callback error: {e}", exc_info=True)
         try:
-            await query.answer(f"❌ خطا: {str(e)[:100]}", show_alert=True)
+            await query.answer(f"❌ خطا", show_alert=True)
         except Exception:
             pass
 
+
+# =========================================================
+#                     Admin Text Handler
+# =========================================================
 
 async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -2179,6 +2456,8 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await decrease_stock_prompt(update, context)
     elif text == "📊 آمار ربات":
         await admin_stats(update, context)
+    elif text == "📈 آمار فروش":
+        await show_daily_sales(update, context)
     elif text == "👥 آمار کاربران":
         await show_users_list(update, context)
     elif text == "🔍 جستجوی کاربر":
@@ -2195,17 +2474,19 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await coupon_menu(update, context)
     elif text == "🎁 تنظیمات رفرال":
         await ref_settings_menu(update, context)
+    elif text == "💳 مدیریت کارت‌ها":
+        await cards_menu(update, context)
+    elif text == "📝 پیام خوش‌آمد":
+        await welcome_msg_prompt(update, context)
     elif text == "🛒 باز/بستن فروشگاه":
         await toggle_shop(update, context)
-    elif text == "💳 شماره کارت" and dm.is_owner(uid):
-        await set_card_prompt(update, context)
     elif text == "🛠 پشتیبانی" and dm.is_owner(uid):
         await set_support_prompt(update, context)
     elif text == "👥 لیست ادمین‌ها" and dm.is_owner(uid):
         await list_admins(update, context)
-    elif text == "➕ افزودن ادمین" and dm.is_owner(uid):
+    elif text == "➕ ادمین" and dm.is_owner(uid):
         await add_admin_prompt(update, context)
-    elif text == "➖ حذف ادمین" and dm.is_owner(uid):
+    elif text == "➖ ادمین" and dm.is_owner(uid):
         await remove_admin_prompt(update, context)
     elif text == "📢 پیام همگانی" and dm.is_owner(uid):
         await broadcast_prompt(update, context)
@@ -2226,7 +2507,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 مسدود هستی.")
         return
 
-    # state ها
+    # States
     if context.user_data.get('awaiting_topup_amount'):
         await handle_topup_amount(update, context)
         return
@@ -2257,7 +2538,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_wallet_user') or context.user_data.get('awaiting_wallet_amount'):
         await handle_wallet_admin(update, context)
         return
-    if context.user_data.get('awaiting_card') or context.user_data.get('awaiting_support'):
+    if context.user_data.get('awaiting_support'):
         await handle_settings(update, context)
         return
     if context.user_data.get('awaiting_add_admin') or context.user_data.get('awaiting_remove_admin'):
@@ -2289,6 +2570,18 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_ref_bonus'):
         await handle_set_ref_bonus(update, context)
         return
+    if context.user_data.get('awaiting_welcome_msg'):
+        await handle_welcome_msg(update, context)
+        return
+    if context.user_data.get('awaiting_order_track'):
+        await handle_track_order(update, context)
+        return
+    if context.user_data.get('awaiting_card_number'):
+        await handle_add_card_number(update, context)
+        return
+    if context.user_data.get('awaiting_card_holder'):
+        await handle_add_card_holder(update, context)
+        return
 
     if await admin_text_handler(update, context):
         return
@@ -2304,6 +2597,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await wallet_menu(update, context)
     elif text == "🎁 دعوت دوستان":
         await show_referral(update, context)
+    elif text == "📜 سفارش‌های من":
+        await show_my_orders(update, context)
+    elif text == "🔍 پیگیری سفارش":
+        await track_order_prompt(update, context)
     elif text == "ℹ️ راهنما":
         await show_help(update, context)
     elif text == "📞 پشتیبانی":
