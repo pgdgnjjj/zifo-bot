@@ -13,14 +13,12 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 # =========================================================
 #             👑 تنظیمات مالکین و ادمین‌ها (از سورس)
 # =========================================================
-# آیدی عددی مالکین (دسترسی کامل) - هر کدوم تو یه خط
 OWNER_IDS = [
     "8407513032",
     "8221493883",
     "8950854926",
 ]
 
-# آیدی عددی ادمین‌های پیش‌فرض
 DEFAULT_ADMIN_IDS = [
     # "123456789",
 ]
@@ -123,7 +121,6 @@ class DataManager:
                 data.setdefault("admin_logs", [])
                 data.setdefault("apps_text", "📱 برای اتصال، از برنامه‌های زیر استفاده کن:")
 
-                # merge مالکین و ادمین‌های سورس با دیتابیس
                 db_owners = set(data.get("owners", []))
                 db_admins = set(data.get("admins", []))
                 data["owners"] = list(db_owners | set(OWNER_IDS))
@@ -1654,19 +1651,27 @@ async def handle_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # =========================================================
-#                     مدیریت محصولات
+#                     مدیریت محصولات  ← ✅ اصلاح شده
 # =========================================================
 
 async def manage_products(upd, ctx):
     if isinstance(upd, CallbackQuery):
         msg = upd.message
         await answer_cb(upd)
+        is_callback = True
     else:
         msg = upd.message
+        is_callback = False
+
     products = dm.data["products"]
     if not products:
-        await msg.reply_text("📭 محصولی نیست.")
+        if is_callback:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
+            await safe_edit(msg, "📭 محصولی نیست.", reply_markup=kb)
+        else:
+            await msg.reply_text("📭 محصولی نیست.")
         return
+
     kb = []
     for p in products:
         configs_count = len(p.get("configs", []))
@@ -1679,7 +1684,11 @@ async def manage_products(upd, ctx):
         ])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")])
     markup = InlineKeyboardMarkup(kb)
-    await safe_edit(msg, "📦 **مدیریت محصولات**", reply_markup=markup)
+
+    if is_callback:
+        await safe_edit(msg, "📦 **مدیریت محصولات**", reply_markup=markup)
+    else:
+        await msg.reply_text("📦 **مدیریت محصولات**", reply_markup=markup)
 
 
 async def delete_product_confirm(query: CallbackQuery, ctx, pid):
@@ -2195,19 +2204,25 @@ async def reject_order(query: CallbackQuery, ctx, oid):
 
 
 # =========================================================
-#                     درخواست‌های شارژ
+#                     درخواست‌های شارژ  ← ✅ اصلاح شده
 # =========================================================
 
 async def show_topup_requests(upd, ctx):
     if isinstance(upd, CallbackQuery):
         msg = upd.message
         await answer_cb(upd)
+        is_callback = True
     else:
         msg = upd.message
+        is_callback = False
+
     pending = [r for r in dm.data["topup_requests"] if r.get("status") == "pending"]
     if not pending:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
-        await safe_edit(msg, "📭 درخواستی نیست.", reply_markup=kb)
+        if is_callback:
+            await safe_edit(msg, "📭 درخواستی نیست.", reply_markup=kb)
+        else:
+            await msg.reply_text("📭 درخواستی نیست.", reply_markup=kb)
         return
     kb = []
     for r in pending[:20]:
@@ -2215,7 +2230,11 @@ async def show_topup_requests(upd, ctx):
     kb.append([InlineKeyboardButton("🗑️ خالی کردن", callback_data="clrtop")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")])
     markup = InlineKeyboardMarkup(kb)
-    await safe_edit(msg, "💰 **درخواست‌های شارژ**", reply_markup=markup)
+
+    if is_callback:
+        await safe_edit(msg, "💰 **درخواست‌های شارژ**", reply_markup=markup)
+    else:
+        await msg.reply_text("💰 **درخواست‌های شارژ**", reply_markup=markup)
 
 
 async def clear_topups(query: CallbackQuery, ctx):
@@ -2426,16 +2445,19 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-#                     👑 مدیریت مالکین# =========================================================
+#                     👑 مدیریت مالکین
+# =========================================================
 
 async def owners_management_menu(upd, ctx):
     if isinstance(upd, CallbackQuery):
         msg = upd.message
         user = upd.from_user
         await answer_cb(upd)
+        is_callback = True
     else:
         msg = upd.message
         user = upd.effective_user
+        is_callback = False
 
     if not dm.is_owner(user.id):
         await msg.reply_text("❌ فقط مالکین دسترسی دارن.")
@@ -2459,7 +2481,7 @@ async def owners_management_menu(upd, ctx):
         [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
     ]
     markup = InlineKeyboardMarkup(kb)
-    if isinstance(upd, CallbackQuery):
+    if is_callback:
         await safe_edit(msg, text, reply_markup=markup)
     else:
         await msg.reply_text(text, reply_markup=markup)
@@ -2604,9 +2626,11 @@ async def admins_management_menu(upd, ctx):
         msg = upd.message
         user = upd.from_user
         await answer_cb(upd)
+        is_callback = True
     else:
         msg = upd.message
         user = upd.effective_user
+        is_callback = False
 
     if not dm.is_owner(user.id):
         await msg.reply_text("❌ فقط مالکین دسترسی دارن.")
@@ -2633,7 +2657,7 @@ async def admins_management_menu(upd, ctx):
         [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
     ]
     markup = InlineKeyboardMarkup(kb)
-    if isinstance(upd, CallbackQuery):
+    if is_callback:
         await safe_edit(msg, text, reply_markup=markup)
     else:
         await msg.reply_text(text, reply_markup=markup)
@@ -2767,13 +2791,18 @@ async def show_admin_logs(upd, ctx):
     if isinstance(upd, CallbackQuery):
         msg = upd.message
         await answer_cb(upd)
+        is_callback = True
     else:
         msg = upd.message
+        is_callback = False
 
     logs = dm.get_admin_logs(30)
     if not logs:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
-        await safe_edit(msg, "📭 هیچ لاگی نیست.", reply_markup=kb)
+        if is_callback:
+            await safe_edit(msg, "📭 هیچ لاگی نیست.", reply_markup=kb)
+        else:
+            await msg.reply_text("📭 هیچ لاگی نیست.", reply_markup=kb)
         return
 
     text = "📜 **آخرین تغییرات ادمین/مالک**\n\n"
@@ -2789,7 +2818,10 @@ async def show_admin_logs(upd, ctx):
         )
 
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
-    await safe_edit(msg, text, reply_markup=kb)
+    if is_callback:
+        await safe_edit(msg, text, reply_markup=kb)
+    else:
+        await msg.reply_text(text, reply_markup=kb)
 
 
 # =========================================================
@@ -2857,7 +2889,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌")
             return
 
-        # منو
         if data == "back_menu":
             await main_menu(query, context)
         elif data == "admin_back":
@@ -2881,19 +2912,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "apply_coupon":
             await apply_coupon_prompt(query, context)
 
-        # کد تخفیف
         elif data == "add_coupon":
             await add_coupon_prompt(query, context)
         elif data == "del_coupon":
             await del_coupon_prompt(query, context)
 
-        # رفرال
         elif data == "set_ref_bonus":
             await set_ref_bonus_prompt(query, context)
         elif data == "toggle_ref":
             await toggle_ref(query, context)
 
-        # کارت‌ها
         elif data == "card_menu":
             await cards_menu(query, context)
         elif data == "card_add":
@@ -2907,7 +2935,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("card_act_"):
             await activate_card_execute(query, context, int(data.split("_")[2]))
 
-        # برنامه‌ها
         elif data == "app_menu":
             await apps_menu(query, context)
         elif data == "app_add":
@@ -2919,7 +2946,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("app_del_"):
             await del_app_execute(query, context, int(data.split("_")[2]))
 
-        # محصولات
         elif data.startswith("prod_"):
             await product_details(query, context, int(data.split("_")[1]))
         elif data.startswith("cartadd_"):
@@ -2937,7 +2963,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("confirmdel_"):
             await confirm_delete_product(query, context, int(data.split("_")[1]))
 
-        # سفارش‌ها
         elif data.startswith("orddet_"):
             await view_order_detail(query, context, data[7:])
         elif data.startswith("appr_"):
@@ -2959,7 +2984,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("clrord_"):
             await clear_orders(query, context, data[7:])
 
-        # شارژ
         elif data.startswith("topdet_"):
             await view_topup_detail(query, context, data[7:])
         elif data.startswith("apprtop_"):
@@ -2969,7 +2993,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "clrtop":
             await clear_topups(query, context)
 
-        # 👑 مالکین
         elif data == "owners_menu":
             await owners_management_menu(query, context)
         elif data == "owner_add":
@@ -2981,7 +3004,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("owner_del_"):
             await owner_delete_confirm(query, context, data[10:])
 
-        # 🛡 ادمین‌ها
         elif data == "admins_menu":
             await admins_management_menu(query, context)
         elif data == "admin_add":
@@ -3091,7 +3113,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 مسدود هستی.")
         return
 
-    # ← اول همه state ها
     if context.user_data.get('awaiting_topup_amount'):
         await handle_topup_amount(update, context); return
     if context.user_data.get('awaiting_topup_receipt'):
