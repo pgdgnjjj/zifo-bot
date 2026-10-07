@@ -10,8 +10,22 @@ from supabase import create_client, Client
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-BOT_TOKEN = "8966599896:AAHtq67RQAp_jDKYz37HPhwhZr0xnbqDCg8"
-OWNER_IDS = ["8950854926","8221493883"]
+# =========================================================
+#             👑 تنظیمات مالکین و ادمین‌ها (از سورس)
+# =========================================================
+# آیدی عددی مالکین (دسترسی کامل) - هر کدوم تو یه خط
+OWNER_IDS = [
+    "8407513032",
+    "8221493883",
+    "8950854926",
+]
+
+# آیدی عددی ادمین‌های پیش‌فرض
+DEFAULT_ADMIN_IDS = [
+    # "123456789",
+]
+
+BOT_TOKEN = "8962767114:AAF2c14P9HQjckG6LN7ZjWsl67Ktt7ldrWY"
 
 SUPABASE_URL = "https://rnccpzqrjnwreigssxdg.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJuY2NwenFyam53cmVpZ3NzeGRnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEyNzczNjEsImV4cCI6MjEwNjg1MzM2MX0.4xOM3zS0i0tL1rUbriDLHjR_c3_PMribG68H1l0GvqM"
@@ -60,7 +74,10 @@ STATE_KEYS = [
     'new_product_name', 'new_product_price', 'new_product_stock', 'new_card_number',
     'wallet_target', 'editing_product_id', 'awaiting_edit_product',
     'awaiting_increase_all', 'awaiting_decrease_all', 'topup_amount',
-    'new_app_name'
+    'new_app_name', 'awaiting_add_owner', 'awaiting_remove_owner',
+    'adding_config_pid', 'awaiting_config_add', 'awaiting_coupon_delete',
+    'awaiting_dm_user', 'awaiting_dm_text', 'dm_target_user',
+    'awaiting_help_text'
 ]
 
 
@@ -103,8 +120,17 @@ class DataManager:
                 data.setdefault("welcome_msg", "🌟 به فروشگاه Zifo خوش آمدید!")
                 data.setdefault("cards", [])
                 data.setdefault("apps", [])
+                data.setdefault("admin_logs", [])
                 data.setdefault("apps_text", "📱 برای اتصال، از برنامه‌های زیر استفاده کن:")
+
+                # merge مالکین و ادمین‌های سورس با دیتابیس
+                db_owners = set(data.get("owners", []))
+                db_admins = set(data.get("admins", []))
+                data["owners"] = list(db_owners | set(OWNER_IDS))
+                data["admins"] = list(db_admins | set(DEFAULT_ADMIN_IDS))
+
                 self.data = data
+                self.save_data()
                 return data
         except Exception as e:
             logger.error(f"Supabase load error: {e}")
@@ -112,7 +138,9 @@ class DataManager:
 
     def create_empty(self):
         data = {
-            "owners": OWNER_IDS, "admins": [], "products": [], "users": {},
+            "owners": list(OWNER_IDS),
+            "admins": list(DEFAULT_ADMIN_IDS),
+            "products": [], "users": {},
             "orders": [], "topup_requests": [], "broadcast_history": [],
             "support_username": "@Zifo_support",
             "user_help_text": "🎮 راهنمای خرید",
@@ -120,6 +148,7 @@ class DataManager:
             "ref_settings": {"bonus": 5000, "min_purchase": 0, "enabled": True},
             "welcome_msg": "🌟 به فروشگاه Zifo خوش آمدید!",
             "cards": [], "apps": [],
+            "admin_logs": [],
             "apps_text": "📱 برای اتصال، از برنامه‌های زیر استفاده کن:",
             "shop_status": {"is_open": True, "closed_message": "🚫 فروشگاه بسته است."}
         }
@@ -204,6 +233,54 @@ class DataManager:
             self.save_data()
             return True
         return False
+
+    def add_owner(self, uid):
+        uid = str(uid)
+        if uid not in self.data["owners"]:
+            self.data["owners"].append(uid)
+            if uid in self.data["admins"]:
+                self.data["admins"].remove(uid)
+            self.save_data()
+            return True
+        return False
+
+    def remove_owner(self, uid):
+        uid = str(uid)
+        if uid in self.data["owners"]:
+            if len(self.data["owners"]) <= 1:
+                return False
+            self.data["owners"].remove(uid)
+            self.save_data()
+            return True
+        return False
+
+    def get_owners_list(self):
+        return list(self.data.get("owners", []))
+
+    def get_admins_list(self):
+        return list(self.data.get("admins", []))
+
+    def is_source_owner(self, uid):
+        return str(uid) in OWNER_IDS
+
+    def is_source_admin(self, uid):
+        return str(uid) in DEFAULT_ADMIN_IDS
+
+    def add_admin_log(self, actor_id, target_id, action):
+        self.data.setdefault("admin_logs", [])
+        self.data["admin_logs"].append({
+            "actor": str(actor_id),
+            "target": str(target_id),
+            "action": action,
+            "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+        if len(self.data["admin_logs"]) > 200:
+            self.data["admin_logs"] = self.data["admin_logs"][-200:]
+        self.save_data()
+
+    def get_admin_logs(self, limit=30):
+        logs = self.data.get("admin_logs", [])
+        return logs[-limit:][::-1]
 
     def get_product(self, pid):
         return next((p for p in self.data["products"] if p["id"] == pid), None)
@@ -456,6 +533,8 @@ def main_kb(uid):
     if dm.is_admin(uid):
         kb.append(["⚙️ پنل ادمین"])
     return ReplyKeyboardMarkup(kb, resize_keyboard=True)
+
+
 # =========================================================
 #                     منوی اصلی
 # =========================================================
@@ -1018,6 +1097,8 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s = dm.data.get("support_username", "@Zifo_support")
     await update.message.reply_text(f"📞 پشتیبانی: {s}", reply_markup=main_kb(update.effective_user.id))
+
+
 # =========================================================
 #                     پنل ادمین
 # =========================================================
@@ -1047,8 +1128,9 @@ async def admin_panel(upd, ctx):
             ["🚫 مسدود/آزاد", "🎟️ کد تخفیف"],
             ["🎁 تنظیمات رفرال", "💳 مدیریت کارت‌ها"],
             ["📱 مدیریت برنامه‌ها", "📝 پیام خوش‌آمد"],
-            ["🛠 پشتیبانی", "👥 لیست ادمین‌ها"],
-            ["➕ ادمین", "➖ ادمین"],
+            ["🛠 پشتیبانی", "📝 راهنمای کاربر"],
+            ["👑 مدیریت مالکین", "🛡 مدیریت ادمین‌ها"],
+            ["📜 لاگ تغییرات", "✉️ پیام به کاربر"],
             ["🛒 باز/بستن فروشگاه"],
             ["📢 پیام همگانی", "🗑️ حذف آخرین پیام"],
             ["🔙 بازگشت"]
@@ -1135,6 +1217,24 @@ async def handle_welcome_msg(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("✅ پیام خوش‌آمد تغییر کرد.")
 
 
+async def help_text_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not dm.is_owner(update.effective_user.id):
+        return
+    clear_states(context)
+    context.user_data['awaiting_help_text'] = True
+    current = dm.data.get("user_help_text", "")
+    await update.message.reply_text(f"📝 **تغییر راهنمای کاربر**\n\nمتن فعلی:\n{current}\n\nمتن جدید رو بنویس:")
+
+
+async def handle_help_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_help_text'):
+        return
+    dm.data["user_help_text"] = update.message.text
+    dm.save_data()
+    clear_states(context)
+    await update.message.reply_text("✅ راهنمای کاربر تغییر کرد.")
+
+
 async def show_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dm.is_admin(update.effective_user.id):
         return
@@ -1191,8 +1291,10 @@ async def handle_search_user(update: Update, context: ContextTypes.DEFAULT_TYPE)
         balance = u.get("balance", 0)
         orders_count = len(u.get("orders", []))
         banned = "🚫" if dm.is_banned(uid) else "✅"
+        owner_badge = " 👑" if dm.is_owner(uid) else ""
+        admin_badge = " 🛡" if (dm.is_admin(uid) and not dm.is_owner(uid)) else ""
         text += (
-            f"{i}. ID: {uid}\n"
+            f"{i}. ID: {uid}{owner_badge}{admin_badge}\n"
             f"   نام: {name} | {uname_str}\n"
             f"   موجودی: {fmt(balance)} ت | سفارش: {orders_count}\n"
             f"   وضعیت: {banned}\n\n"
@@ -1363,7 +1465,7 @@ async def activate_card_execute(upd, ctx, idx):
 
 
 # =========================================================
-#                     مدیریت برنامه‌ها (APK)
+#                     مدیریت برنامه‌ها
 # =========================================================
 
 async def apps_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1414,7 +1516,6 @@ async def handle_add_app_file(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     name = context.user_data.get('new_app_name', 'برنامه')
     file_id = None
-    file_type = "document"
 
     if update.message.document:
         file_id = update.message.document.file_id
@@ -1550,6 +1651,8 @@ async def handle_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"🔑 کانفیگ: {len(configs)}\n\n"
             f"برای بازگشت، دکمه ⚙️ پنل ادمین رو بزن."
         )
+
+
 # =========================================================
 #                     مدیریت محصولات
 # =========================================================
@@ -2089,6 +2192,8 @@ async def reject_order(query: CallbackQuery, ctx, oid):
     dm.update_order(oid, {"status": "rejected"})
     await query.answer("رد شد")
     await show_orders_by_status(query, ctx, ['waiting_admin'])
+
+
 # =========================================================
 #                     درخواست‌های شارژ
 # =========================================================
@@ -2183,7 +2288,7 @@ async def reject_topup(query: CallbackQuery, ctx, rid):
 
 
 # =========================================================
-#                     کاربر / بن / کیف پول
+#                     کاربر / بن / کیف پول / پیام مستقیم
 # =========================================================
 
 async def user_check_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2200,9 +2305,10 @@ async def handle_user_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = dm.get_user(uid)
     banned = dm.is_banned(uid)
     ud = user_display(uid, u.get("username", ""))
+    owner_badge = " 👑" if dm.is_owner(uid) else (" 🛡" if dm.is_admin(uid) else "")
     clear_states(context)
     await update.message.reply_text(
-        f"👤 {ud}\n"
+        f"👤 {ud}{owner_badge}\n"
         f"📛 {u.get('first_name', '-')}\n"
         f"💰 {fmt(u.get('balance', 0))} ت\n"
         f"📦 {len(u.get('orders', []))} سفارش\n"
@@ -2262,6 +2368,43 @@ async def handle_wallet_admin(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"✅ {fmt(u['balance'])} ت")
 
 
+async def dm_user_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not dm.is_owner(update.effective_user.id):
+        return
+    clear_states(context)
+    context.user_data['awaiting_dm_user'] = True
+    await update.message.reply_text("✉️ **ارسال پیام مستقیم**\nشناسه عددی کاربر:")
+
+
+async def handle_dm_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.message.text.strip()
+    if not uid.isdigit():
+        await update.message.reply_text("❌ عدد.")
+        return
+    u = dm.get_user(uid)
+    if not u:
+        await update.message.reply_text("❌ کاربر پیدا نشد.")
+        return
+    context.user_data['dm_target_user'] = uid
+    context.user_data['awaiting_dm_user'] = False
+    context.user_data['awaiting_dm_text'] = True
+    name = u.get("first_name", "?") or "?"
+    await update.message.reply_text(f"👤 {name}\n\nمتن پیام رو بنویس:")
+
+
+async def handle_dm_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_dm_text'):
+        return
+    target = context.user_data.get('dm_target_user')
+    text = update.message.text
+    try:
+        await context.bot.send_message(int(target), f"📩 **پیام از مدیریت:**\n\n{text}")
+        await update.message.reply_text("✅ پیام ارسال شد.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا: {e}")
+    clear_states(context)
+
+
 # =========================================================
 #                     تنظیمات / ادمین‌ها
 # =========================================================
@@ -2282,43 +2425,371 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ پشتیبانی ثبت شد.")
 
 
-async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    owners = dm.data["owners"]
-    admins = dm.data["admins"]
-    text = "👑 مالکین:\n" + "\n".join(owners) + "\n\n🛡 ادمین‌ها:\n"
-    text += "\n".join(admins) if admins else "هیچ"
-    await update.message.reply_text(text)
+# =========================================================
+#                     👑 مدیریت مالکین# =========================================================
 
+async def owners_management_menu(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        user = upd.from_user
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+        user = upd.effective_user
 
-async def add_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not dm.is_owner(update.effective_user.id):
+    if not dm.is_owner(user.id):
+        await msg.reply_text("❌ فقط مالکین دسترسی دارن.")
         return
-    clear_states(context)
-    context.user_data['awaiting_add_admin'] = True
-    await update.message.reply_text("➕ شناسه ادمین جدید:")
+
+    owners = dm.get_owners_list()
+    text = f"👑 **مدیریت مالکین**\n\n📊 تعداد: {len(owners)} نفر\n\n"
+    for i, oid in enumerate(owners, 1):
+        u = dm.data["users"].get(str(oid), {})
+        name = u.get("first_name", "ناشناس") or "ناشناس"
+        username = u.get("username", "")
+        uname_str = f"@{username}" if username else "—"
+        source_badge = " 🔒" if dm.is_source_owner(oid) else ""
+        text += f"{i}. `{oid}`{source_badge}\n   📛 {name} | {uname_str}\n\n"
+
+    text += "🔒 = مالک سورس (قابل حذف نیست)"
+
+    kb = [
+        [InlineKeyboardButton("➕ افزودن مالک جدید", callback_data="owner_add")],
+        [InlineKeyboardButton("🗑️ حذف مالک", callback_data="owner_del_menu")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
+    ]
+    markup = InlineKeyboardMarkup(kb)
+    if isinstance(upd, CallbackQuery):
+        await safe_edit(msg, text, reply_markup=markup)
+    else:
+        await msg.reply_text(text, reply_markup=markup)
 
 
-async def remove_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not dm.is_owner(update.effective_user.id):
+async def owner_add_prompt(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+    clear_states(ctx)
+    ctx.user_data['awaiting_add_owner'] = True
+    await msg.reply_text(
+        "👑 **افزودن مالک جدید**\n\n"
+        "🔍 آیدی عددی کاربر رو بفرست:\n"
+        "برای انصراف /cancel"
+    )
+
+
+async def owner_remove_menu(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+
+    owners = dm.get_owners_list()
+    removable = [o for o in owners if not dm.is_source_owner(o)]
+
+    if not removable:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="owners_menu")]])
+        await safe_edit(msg, "❌ هیچ مالکی قابل حذف نیست.\n(همه مالکین سورس هستن)", reply_markup=kb)
         return
-    clear_states(context)
-    context.user_data['awaiting_remove_admin'] = True
-    await update.message.reply_text("➖ شناسه ادمین:")
+
+    kb = []
+    for oid in removable:
+        u = dm.data["users"].get(str(oid), {})
+        name = u.get("first_name", "ناشناس") or "ناشناس"
+        kb.append([InlineKeyboardButton(
+            f"❌ حذف {name} | {oid}",
+            callback_data=f"owner_del_{oid}"
+        )])
+    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="owners_menu")])
+    await safe_edit(msg, "🗑️ **کدوم مالک رو حذف کنم؟**", reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def owner_delete_confirm(upd, ctx, target_id):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+
+    if dm.is_source_owner(target_id):
+        await answer_cb(upd, "❌ این مالک سورس هست و حذف نمی‌شه!", show_alert=True)
+        return
+
+    u = dm.data["users"].get(str(target_id), {})
+    name = u.get("first_name", "ناشناس") or "ناشناس"
+
+    kb = [
+        [InlineKeyboardButton("✅ بله، حذف کن", callback_data=f"owner_delok_{target_id}")],
+        [InlineKeyboardButton("❌ انصراف", callback_data="owner_del_menu")]
+    ]
+    await safe_edit(
+        msg,
+        f"⚠️ **تأیید حذف مالک**\n\n"
+        f"👤 {name}\n"
+        f"🆔 `{target_id}`\n\n"
+        f"مطمئنی؟",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+
+async def owner_delete_execute(upd, ctx, target_id):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        actor = upd.from_user
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+        actor = upd.effective_user
+
+    if dm.is_source_owner(target_id):
+        await msg.reply_text("❌ این مالک سورس هست و حذف نمی‌شه!")
+        return
+
+    if str(target_id) == str(actor.id):
+        await msg.reply_text("❌ نمی‌تونی خودت رو حذف کنی!")
+        return
+
+    if dm.remove_owner(target_id):
+        dm.add_admin_log(actor.id, target_id, "حذف مالک")
+        try:
+            await ctx.bot.send_message(int(target_id), "❌ شما از لیست مالکین ربات حذف شدید.")
+        except Exception:
+            pass
+        await msg.reply_text(f"✅ مالک `{target_id}` حذف شد.")
+    else:
+        await msg.reply_text("❌ حذف نشد. (آخرین مالک قابل حذف نیست)")
+
+
+async def handle_owner_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.message.text.strip()
+
+    if uid.startswith("@"):
+        await update.message.reply_text("❌ فقط آیدی عددی قابل قبوله.")
+        return
+
+    if not uid.isdigit():
+        await update.message.reply_text("❌ آیدی باید عدد باشه.")
+        return
+
+    if context.user_data.get('awaiting_add_owner'):
+        actor = update.effective_user.id
+        if dm.add_owner(uid):
+            dm.add_admin_log(actor, uid, "افزودن مالک")
+            clear_states(context)
+            await update.message.reply_text(
+                f"✅ `{uid}` به لیست مالکین اضافه شد.\n\n"
+                f"👑 این کاربر حالا دسترسی کامل داره."
+            )
+            try:
+                await context.bot.send_message(
+                    int(uid),
+                    "👑 **شما به عنوان مالک ربات تعیین شدید!**\n\n"
+                    "برای دسترسی به پنل، دستور /start رو بزن."
+                )
+            except Exception:
+                pass
+        else:
+            await update.message.reply_text("❌ این کاربر از قبل مالکه.")
+
+
+# =========================================================
+#                     🛡 مدیریت ادمین‌ها
+# =========================================================
+
+async def admins_management_menu(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        user = upd.from_user
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+        user = upd.effective_user
+
+    if not dm.is_owner(user.id):
+        await msg.reply_text("❌ فقط مالکین دسترسی دارن.")
+        return
+
+    admins = dm.get_admins_list()
+    text = f"🛡 **مدیریت ادمین‌ها**\n\n📊 تعداد: {len(admins)} نفر\n\n"
+    if not admins:
+        text += "❌ هیچ ادمینی وجود نداره."
+    else:
+        for i, aid in enumerate(admins, 1):
+            u = dm.data["users"].get(str(aid), {})
+            name = u.get("first_name", "ناشناس") or "ناشناس"
+            username = u.get("username", "")
+            uname_str = f"@{username}" if username else "—"
+            source_badge = " 🔒" if dm.is_source_admin(aid) else ""
+            text += f"{i}. `{aid}`{source_badge}\n   📛 {name} | {uname_str}\n\n"
+
+    text += "🔒 = ادمین سورس (قابل حذف نیست)"
+
+    kb = [
+        [InlineKeyboardButton("➕ افزودن ادمین جدید", callback_data="admin_add")],
+        [InlineKeyboardButton("🗑️ حذف ادمین", callback_data="admin_del_menu")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
+    ]
+    markup = InlineKeyboardMarkup(kb)
+    if isinstance(upd, CallbackQuery):
+        await safe_edit(msg, text, reply_markup=markup)
+    else:
+        await msg.reply_text(text, reply_markup=markup)
+
+
+async def admin_add_prompt(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+    clear_states(ctx)
+    ctx.user_data['awaiting_add_admin'] = True
+    await msg.reply_text(
+        "🛡 **افزودن ادمین جدید**\n\n"
+        "🔍 آیدی عددی کاربر رو بفرست:\n"
+        "برای انصراف /cancel"
+    )
+
+
+async def admin_remove_menu(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+
+    admins = dm.get_admins_list()
+    removable = [a for a in admins if not dm.is_source_admin(a)]
+
+    if not removable:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admins_menu")]])
+        await safe_edit(msg, "❌ هیچ ادمینی قابل حذف نیست.", reply_markup=kb)
+        return
+
+    kb = []
+    for aid in removable:
+        u = dm.data["users"].get(str(aid), {})
+        name = u.get("first_name", "ناشناس") or "ناشناس"
+        kb.append([InlineKeyboardButton(
+            f"❌ حذف {name} | {aid}",
+            callback_data=f"admin_del_{aid}"
+        )])
+    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admins_menu")])
+    await safe_edit(msg, "🗑️ **کدوم ادمین رو حذف کنم؟**", reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def admin_delete_confirm(upd, ctx, target_id):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+
+    if dm.is_source_admin(target_id):
+        await answer_cb(upd, "❌ این ادمین سورس هست!", show_alert=True)
+        return
+
+    u = dm.data["users"].get(str(target_id), {})
+    name = u.get("first_name", "ناشناس") or "ناشناس"
+
+    kb = [
+        [InlineKeyboardButton("✅ بله", callback_data=f"admin_delok_{target_id}")],
+        [InlineKeyboardButton("❌ انصراف", callback_data="admin_del_menu")]
+    ]
+    await safe_edit(
+        msg,
+        f"⚠️ **تأیید حذف ادمین**\n\n👤 {name}\n🆔 `{target_id}`",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+
+async def admin_delete_execute(upd, ctx, target_id):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        actor = upd.from_user
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+        actor = upd.effective_user
+
+    if dm.is_source_admin(target_id):
+        await msg.reply_text("❌ این ادمین سورس هست!")
+        return
+
+    if dm.remove_admin(target_id):
+        dm.add_admin_log(actor.id, target_id, "حذف ادمین")
+        try:
+            await ctx.bot.send_message(int(target_id), "❌ شما از لیست ادمین‌های ربات حذف شدید.")
+        except Exception:
+            pass
+        await msg.reply_text(f"✅ ادمین `{target_id}` حذف شد.")
+    else:
+        await msg.reply_text("❌ ادمین پیدا نشد.")
 
 
 async def handle_admin_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.text.strip()
+
+    if uid.startswith("@"):
+        await update.message.reply_text("❌ فقط آیدی عددی.")
+        return
+
+    if not uid.isdigit():
+        await update.message.reply_text("❌ آیدی باید عدد باشه.")
+        return
+
     if context.user_data.get('awaiting_add_admin'):
+        actor = update.effective_user.id
         if dm.add_admin(uid):
-            await update.message.reply_text(f"✅ {uid} ادمین شد.")
+            dm.add_admin_log(actor, uid, "افزودن ادمین")
+            clear_states(context)
+            await update.message.reply_text(f"✅ `{uid}` به لیست ادمین‌ها اضافه شد.")
+            try:
+                await context.bot.send_message(
+                    int(uid),
+                    "🛡 **شما به عنوان ادمین ربات تعیین شدید!**\n\n"
+                    "برای دسترسی به پنل، دستور /start رو بزن."
+                )
+            except Exception:
+                pass
         else:
-            await update.message.reply_text("❌ از قبل ادمینه.")
-    elif context.user_data.get('awaiting_remove_admin'):
-        if dm.remove_admin(uid):
-            await update.message.reply_text(f"✅ {uid} حذف شد.")
-        else:
-            await update.message.reply_text("❌ ادمین نیست.")
-    clear_states(context)
+            await update.message.reply_text("❌ این کاربر از قبل ادمین یا مالکه.")
+
+
+# =========================================================
+#                     📜 لاگ تغییرات
+# =========================================================
+
+async def show_admin_logs(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+
+    logs = dm.get_admin_logs(30)
+    if not logs:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
+        await safe_edit(msg, "📭 هیچ لاگی نیست.", reply_markup=kb)
+        return
+
+    text = "📜 **آخرین تغییرات ادمین/مالک**\n\n"
+    for log in logs:
+        actor_u = dm.data["users"].get(str(log["actor"]), {})
+        target_u = dm.data["users"].get(str(log["target"]), {})
+        actor_name = actor_u.get("first_name", "?") or "?"
+        target_name = target_u.get("first_name", "?") or "?"
+        text += (
+            f"🔹 **{log['action']}**\n"
+            f"👤 {actor_name} → 🎯 {target_name}\n"
+            f"📅 {log['date']}\n\n"
+        )
+
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
+    await safe_edit(msg, text, reply_markup=kb)
 
 
 # =========================================================
@@ -2498,6 +2969,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "clrtop":
             await clear_topups(query, context)
 
+        # 👑 مالکین
+        elif data == "owners_menu":
+            await owners_management_menu(query, context)
+        elif data == "owner_add":
+            await owner_add_prompt(query, context)
+        elif data == "owner_del_menu":
+            await owner_remove_menu(query, context)
+        elif data.startswith("owner_delok_"):
+            await owner_delete_execute(query, context, data[12:])
+        elif data.startswith("owner_del_"):
+            await owner_delete_confirm(query, context, data[10:])
+
+        # 🛡 ادمین‌ها
+        elif data == "admins_menu":
+            await admins_management_menu(query, context)
+        elif data == "admin_add":
+            await admin_add_prompt(query, context)
+        elif data == "admin_del_menu":
+            await admin_remove_menu(query, context)
+        elif data.startswith("admin_delok_"):
+            await admin_delete_execute(query, context, data[12:])
+        elif data.startswith("admin_del_"):
+            await admin_delete_confirm(query, context, data[10:])
+
         else:
             await query.answer("❌ نامعتبر", show_alert=True)
 
@@ -2563,12 +3058,16 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await toggle_shop(update, context)
     elif text == "🛠 پشتیبانی" and dm.is_owner(uid):
         await set_support_prompt(update, context)
-    elif text == "👥 لیست ادمین‌ها" and dm.is_owner(uid):
-        await list_admins(update, context)
-    elif text == "➕ ادمین" and dm.is_owner(uid):
-        await add_admin_prompt(update, context)
-    elif text == "➖ ادمین" and dm.is_owner(uid):
-        await remove_admin_prompt(update, context)
+    elif text == "📝 راهنمای کاربر" and dm.is_owner(uid):
+        await help_text_prompt(update, context)
+    elif text == "👑 مدیریت مالکین" and dm.is_owner(uid):
+        await owners_management_menu(update, context)
+    elif text == "🛡 مدیریت ادمین‌ها" and dm.is_owner(uid):
+        await admins_management_menu(update, context)
+    elif text == "📜 لاگ تغییرات" and dm.is_owner(uid):
+        await show_admin_logs(update, context)
+    elif text == "✉️ پیام به کاربر" and dm.is_owner(uid):
+        await dm_user_prompt(update, context)
     elif text == "📢 پیام همگانی" and dm.is_owner(uid):
         await broadcast_prompt(update, context)
     elif text == "🗑️ حذف آخرین پیام" and dm.is_owner(uid):
@@ -2580,6 +3079,8 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         return False
     return True
+
+
 # =========================================================
 #                     Message Handler
 # =========================================================
@@ -2590,7 +3091,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 مسدود هستی.")
         return
 
-    # ← اول همه state ها (ترتیب مهم!)
+    # ← اول همه state ها
     if context.user_data.get('awaiting_topup_amount'):
         await handle_topup_amount(update, context); return
     if context.user_data.get('awaiting_topup_receipt'):
@@ -2613,8 +3114,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_wallet_admin(update, context); return
     if context.user_data.get('awaiting_support'):
         await handle_settings(update, context); return
-    if context.user_data.get('awaiting_add_admin') or context.user_data.get('awaiting_remove_admin'):
+    if context.user_data.get('awaiting_add_admin'):
         await handle_admin_edit(update, context); return
+    if context.user_data.get('awaiting_add_owner'):
+        await handle_owner_edit(update, context); return
     if context.user_data.get('awaiting_broadcast'):
         await handle_broadcast(update, context); return
     if (context.user_data.get('awaiting_product_name') or
@@ -2636,6 +3139,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_set_ref_bonus(update, context); return
     if context.user_data.get('awaiting_welcome_msg'):
         await handle_welcome_msg(update, context); return
+    if context.user_data.get('awaiting_help_text'):
+        await handle_help_text(update, context); return
     if context.user_data.get('awaiting_order_track'):
         await handle_track_order(update, context); return
     if context.user_data.get('awaiting_card_number'):
@@ -2648,6 +3153,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_add_app_file(update, context); return
     if context.user_data.get('awaiting_apps_text'):
         await handle_apps_text(update, context); return
+    if context.user_data.get('awaiting_dm_user'):
+        await handle_dm_user(update, context); return
+    if context.user_data.get('awaiting_dm_text'):
+        await handle_dm_text(update, context); return
 
     if await admin_text_handler(update, context):
         return
