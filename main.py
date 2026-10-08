@@ -18,9 +18,7 @@ OWNER_IDS = [
     "8950854926",
 ]
 
-DEFAULT_ADMIN_IDS = [
-    # "123456789",
-]
+DEFAULT_ADMIN_IDS = []
 
 BOT_TOKEN = "8966599896:AAHir-ijsCTxm7C_7qO_ZGAcegp4RViUt8s"
 
@@ -128,7 +126,8 @@ class DataManager:
                     "windows": []
                 })
 
-                data.setdefault("force_join", {
+                # 🔥 Force Join کاملاً غیرفعال و ریست می‌شه
+                data["force_join"] = {
                     "enabled": False,
                     "channel_id": "",
                     "channel_link": "",
@@ -137,7 +136,7 @@ class DataManager:
                     "require_channel": False,
                     "require_group": False,
                     "message": "🔒 برای استفاده از ربات، ابتدا در کانال و گروه ما عضو شوید:"
-                })
+                }
 
                 db_owners = set(data.get("owners", []))
                 db_admins = set(data.get("admins", []))
@@ -550,20 +549,18 @@ class DataManager:
         return 0
 
     def get_force_join(self):
-        self.data.setdefault("force_join", {
+        # 🔥 همیشه غیرفعال برمی‌گردونه
+        return {
             "enabled": False,
             "channel_id": "", "channel_link": "",
             "group_id": "", "group_link": "",
             "require_channel": False, "require_group": False,
             "message": "🔒 برای استفاده از ربات، ابتدا در کانال و گروه ما عضو شوید:"
-        })
-        return self.data["force_join"]
+        }
 
     def set_force_join(self, updates):
-        fj = self.get_force_join()
-        fj.update(updates)
-        self.data["force_join"] = fj
-        self.save_data()
+        # 🔥 این تابع کاری انجام نمی‌ده
+        pass
 
 
 dm = DataManager()
@@ -594,62 +591,17 @@ async def answer_cb(q, text="", show_alert=False):
 
 
 # =========================================================
-#             🔒 بررسی عضویت اجباری
+#             🔒 بررسی عضویت اجباری (غیرفعال شده)
 # =========================================================
 
 async def check_membership(bot, user_id):
-    fj = dm.get_force_join()
-    if not fj.get("enabled", False):
-        return True, []
-
-    not_joined = []
-
-    if fj.get("require_channel") and fj.get("channel_id"):
-        try:
-            member = await bot.get_chat_member(chat_id=fj["channel_id"], user_id=int(user_id))
-            if member.status in ["left", "kicked"]:
-                not_joined.append("channel")
-        except Exception as e:
-            logger.error(f"Channel check error: {e}")
-            not_joined.append("channel")
-
-    if fj.get("require_group") and fj.get("group_id"):
-        try:
-            member = await bot.get_chat_member(chat_id=fj["group_id"], user_id=int(user_id))
-            if member.status in ["left", "kicked"]:
-                not_joined.append("group")
-        except Exception as e:
-            logger.error(f"Group check error: {e}")
-            not_joined.append("group")
-
-    return len(not_joined) == 0, not_joined
+    # 🔥 همیشه True برمی‌گردونه (یعنی کاربر عضو هست)
+    return True, []
 
 
 async def show_force_join_message(upd, ctx):
-    if isinstance(upd, CallbackQuery):
-        msg = upd.message
-        await answer_cb(upd)
-        is_callback = True
-    else:
-        msg = upd.message
-        is_callback = False
-
-    fj = dm.get_force_join()
-    message = fj.get("message", "🔒 برای استفاده از ربات، ابتدا در کانال و گروه ما عضو شوید:")
-
-    buttons = []
-    if fj.get("require_channel") and fj.get("channel_link"):
-        buttons.append([InlineKeyboardButton("📢 عضویت در کانال", url=fj["channel_link"])])
-    if fj.get("require_group") and fj.get("group_link"):
-        buttons.append([InlineKeyboardButton("👥 عضویت در گروه", url=fj["group_link"])])
-    buttons.append([InlineKeyboardButton("✅ عضو شدم، بررسی کن", callback_data="check_membership")])
-
-    kb = InlineKeyboardMarkup(buttons)
-
-    if is_callback:
-        await safe_edit(msg, message, reply_markup=kb)
-    else:
-        await msg.reply_text(message, reply_markup=kb)
+    # 🔥 این تابع دیگه استفاده نمی‌شه
+    pass
 
 
 def main_kb(uid):
@@ -684,12 +636,6 @@ async def main_menu(upd, ctx):
     if dm.is_banned(uid):
         await msg.reply_text("🚫 مسدود هستی.")
         return
-
-    if not dm.is_admin(uid):
-        is_member, missing = await check_membership(ctx.bot, uid)
-        if not is_member:
-            await show_force_join_message(upd, ctx)
-            return
 
     welcome = dm.data.get("welcome_msg", "🌟 به فروشگاه Zifo خوش آمدید!")
     await msg.reply_text(welcome, reply_markup=main_kb(uid))
@@ -743,12 +689,6 @@ async def test_free_menu(upd, ctx):
     if dm.is_banned(uid):
         await msg.reply_text("🚫 مسدود هستی.")
         return
-
-    if not dm.is_admin(uid):
-        is_member, missing = await check_membership(ctx.bot, uid)
-        if not is_member:
-            await show_force_join_message(upd, ctx)
-            return
 
     u = dm.get_user(uid)
     if u.get("test_used"):
@@ -3336,25 +3276,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌")
             return
 
-        if data == "check_membership":
-            user_id = str(query.from_user.id)
-            is_member, missing = await check_membership(context.bot, user_id)
-            if is_member:
-                await query.answer("✅ تأیید شد!", show_alert=True)
-                try:
-                    await query.message.delete()
-                except Exception:
-                    pass
-                await main_menu(query, context)
-            else:
-                missing_text = []
-                if "channel" in missing:
-                    missing_text.append("📢 کانال")
-                if "group" in missing:
-                    missing_text.append("👥 گروه")
-                await query.answer(f"❌ هنوز عضو نشدی: {' و '.join(missing_text)}", show_alert=True)
-            return
-
         if data == "back_menu":
             await main_menu(query, context)
         elif data == "admin_back":
@@ -3634,12 +3555,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🔒 اگه منتظر پیام همگانی هستیم، اول اینو چک کن
     if context.user_data.get('awaiting_broadcast') and dm.is_owner(uid):
         await handle_broadcast(update, context); return
-
-    if not dm.is_admin(uid) and not text.startswith("/"):
-        is_member, missing = await check_membership(context.bot, uid)
-        if not is_member:
-            await show_force_join_message(update, context)
-            return
 
     if context.user_data.get('awaiting_test_config_add'):
         await handle_test_config_add(update, context); return
