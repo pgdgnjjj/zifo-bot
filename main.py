@@ -5,7 +5,6 @@ import random
 import string
 from datetime import datetime, timedelta
 
-from flask import Flask, request
 from supabase import create_client, Client
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -27,8 +26,6 @@ BOT_TOKEN = "8966599896:AAHir-ijsCTxm7C_7qO_ZGAcegp4RViUt8s"
 
 SUPABASE_URL = "https://rnccpzqrjnwreigssxdg.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJuY2NwenFyam53cmVpZ3NzeGRnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEyNzczNjEsImV4cCI6MjEwNjg1MzM2MX0.4xOM3zS0i0tL1rUbriDLHjR_c3_PMribG68H1l0GvqM"
-
-PORT = int(os.getenv("PORT", 8000))
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -3753,7 +3750,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #                     Setup
 # =========================================================
 
-application = Application.builder().token(BOT_TOKEN).updater(None).build()
+application = Application.builder().token(BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("cancel", cancel))
 application.add_handler(CallbackQueryHandler(button_handler))
@@ -3762,57 +3759,6 @@ application.add_handler(MessageHandler(filters.Document.ALL, message_handler))
 application.add_handler(MessageHandler(filters.VIDEO, message_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-flask_app = Flask(__name__)
-
-
-@flask_app.route("/")
-def index():
-    return "✅ ربات فعال است"
-
-
-@flask_app.route("/health")
-def health():
-    return "OK"
-
-
-@flask_app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    try:
-        update_data = request.get_json(force=True)
-        update = Update.de_json(update_data, application.bot)
-
-        import asyncio
-
-        async def process():
-            async with application:
-                await application.initialize()
-                await application.process_update(update)
-
-        asyncio.run(process())
-        return "OK"
-    except Exception as e:
-        logger.error(f"Webhook error: {e}", exc_info=True)
-        return "Error", 500
-
-
-@flask_app.route("/set_webhook")
-def set_webhook():
-    try:
-        webhook_url = f"https://{request.host}/{BOT_TOKEN}"
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        async def setup():
-            async with application:
-                await application.bot.set_webhook(url=webhook_url)
-
-        loop.run_until_complete(setup())
-        loop.close()
-        return f"✅ Webhook set to: {webhook_url}"
-    except Exception as e:
-        return f"❌ Error: {e}", 500
-
 
 if __name__ == "__main__":
-    flask_app.run(host="0.0.0.0", port=PORT)
+    application.run_polling()
