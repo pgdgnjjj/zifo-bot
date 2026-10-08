@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from flask import Flask, request
 from supabase import create_client, Client
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, ChatMember
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # =========================================================
@@ -44,10 +44,6 @@ def gen_req_id():
     return f"TOP-{datetime.now().strftime('%Y%m%d%H%M%S')}-{random.randint(1000,9999)}"
 
 
-def gen_test_id():
-    return f"TEST-{datetime.now().strftime('%Y%m%d%H%M%S')}-{random.randint(100,999)}"
-
-
 def gen_ref_code(uid):
     return f"REF{str(uid)[-6:]}{random.randint(100, 999)}"
 
@@ -79,11 +75,11 @@ STATE_KEYS = [
     'new_app_name', 'awaiting_add_owner', 'awaiting_remove_owner',
     'adding_config_pid', 'awaiting_config_add', 'awaiting_coupon_delete',
     'awaiting_dm_user', 'awaiting_dm_text', 'dm_target_user',
-    'awaiting_help_text', 'awaiting_test_config', 'awaiting_test_platform',
-    'test_user_target', 'awaiting_test_review',
-    'awaiting_channel', 'awaiting_group', 'awaiting_forced_channel',
-    'awaiting_forced_group', 'awaiting_channel_id', 'awaiting_group_id',
-    'awaiting_channel_link', 'awaiting_group_link'
+    'awaiting_help_text',
+    'awaiting_channel_id', 'awaiting_channel_link',
+    'awaiting_group_id', 'awaiting_group_link',
+    'awaiting_forced_message',
+    'awaiting_test_config_add', 'test_platform_target'
 ]
 
 
@@ -127,9 +123,14 @@ class DataManager:
                 data.setdefault("cards", [])
                 data.setdefault("apps", [])
                 data.setdefault("admin_logs", [])
-                data.setdefault("test_requests", [])
-                data.setdefault("test_stats", {"total_tests": 0, "unique_users": []})
                 data.setdefault("apps_text", "📱 برای اتصال، از برنامه‌های زیر استفاده کن:")
+
+                # کانفیگ‌های تست (خالی)
+                data.setdefault("test_configs", {
+                    "android": [],
+                    "ios": [],
+                    "windows": []
+                })
 
                 # عضویت اجباری
                 data.setdefault("force_join", {
@@ -168,8 +169,7 @@ class DataManager:
             "welcome_msg": "🌟 به فروشگاه Zifo خوش آمدید!",
             "cards": [], "apps": [],
             "admin_logs": [],
-            "test_requests": [],
-            "test_stats": {"total_tests": 0, "unique_users": []},
+            "test_configs": {"android": [], "ios": [], "windows": []},
             "apps_text": "📱 برای اتصال، از برنامه‌های زیر استفاده کن:",
             "shop_status": {"is_open": True, "closed_message": "🚫 فروشگاه بسته است."},
             "force_join": {
@@ -209,14 +209,14 @@ class DataManager:
                 "username": "", "first_name": "",
                 "ref_code": gen_ref_code(uid),
                 "invited_by": None, "invited_count": 0,
-                "tests_count": 0
+                "test_used": False
             }
             self.save_data()
         u = self.data["users"][uid]
         if "ref_code" not in u or not u["ref_code"]:
             u["ref_code"] = gen_ref_code(uid)
             self.save_data()
-        u.setdefault("tests_count", 0)
+        u.setdefault("test_used", False)
         return u
 
     def find_user_by_refcode(self, code):
@@ -459,15 +459,6 @@ class DataManager:
     def get_broadcast_history(self):
         return self.data.get("broadcast_history", [])
 
-    def delete_broadcast(self, index):
-        h = self.data.get("broadcast_history", [])
-        if 0 <= index < len(h):
-            removed = h.pop(index)
-            self.data["broadcast_history"] = h
-            self.save_data()
-            return removed
-        return None
-
     def get_coupons(self):
         return self.data.get("coupons", {})
 
@@ -533,51 +524,47 @@ class DataManager:
             result.append({"date": day_str, "orders": len(orders), "revenue": revenue})
         return result
 
-    def add_test_request(self, req):
-        tid = gen_test_id()
-        req["test_id"] = tid
-        req["date"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        req["status"] = "pending"
-        self.data.setdefault("test_requests", [])
-        self.data["test_requests"].append(req)
+    # 🧪 کانفیگ‌های تست
+    def get_test_configs(self):
+        self.data.setdefault("test_configs", {"android": [], "ios": [], "windows": []})
+        return self.data["test_configs"]
 
-        self.data.setdefault("test_stats", {"total_tests": 0, "unique_users": []})
-        self.data["test_stats"]["total_tests"] = self.data["test_stats"].get("total_tests", 0) + 1
-        uid_str = str(req["user_id"])
-        if uid_str not in self.data["test_stats"]["unique_users"]:
-            self.data["test_stats"]["unique_users"].append(uid_str)
-
-        u = self.get_user(req["user_id"])
-        u["tests_count"] = u.get("tests_count", 0) + 1
-
+    def add_test_config(self, platform, config_text):
+        tc = self.get_test_configs()
+        tc.setdefault(platform, [])
+        tc[platform].append({
+            "text": config_text,
+            "added": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+        self.data["test_configs"] = tc
         self.save_data()
-        return tid
 
-    def get_test(self, tid):
-        return next((t for t in self.data.get("test_requests", []) if t.get("test_id") == tid), None)
-
-    def update_test(self, tid, updates):
-        t = self.get_test(tid)
-        if t:
-            t.update(updates)
+    def remove_test_config(self, platform, idx):
+        tc = self.get_test_configs()
+        if platform in tc and 0 <= idx < len(tc[platform]):
+            removed = tc[platform].pop(idx)
+            self.data["test_configs"] = tc
             self.save_data()
-            return True
-        return False
+            return removed
+        return None
 
-    def get_test_stats(self):
-        self.data.setdefault("test_stats", {"total_tests": 0, "unique_users": []})
-        return self.data["test_stats"]
+    def clear_test_configs(self, platform):
+        tc = self.get_test_configs()
+        if platform in tc:
+            count = len(tc[platform])
+            tc[platform] = []
+            self.data["test_configs"] = tc
+            self.save_data()
+            return count
+        return 0
 
-    # 🔒 توابع عضویت اجباری
+    # 🔒 عضویت اجباری
     def get_force_join(self):
         self.data.setdefault("force_join", {
             "enabled": False,
-            "channel_id": "",
-            "channel_link": "",
-            "group_id": "",
-            "group_link": "",
-            "require_channel": False,
-            "require_group": False,
+            "channel_id": "", "channel_link": "",
+            "group_id": "", "group_link": "",
+            "require_channel": False, "require_group": False,
             "message": "🔒 برای استفاده از ربات، ابتدا در کانال و گروه ما عضو شوید:"
         })
         return self.data["force_join"]
@@ -621,14 +608,12 @@ async def answer_cb(q, text="", show_alert=False):
 # =========================================================
 
 async def check_membership(bot, user_id):
-    """بررسی می‌کنه که کاربر توی کانال/گروه عضو هست یا نه"""
     fj = dm.get_force_join()
     if not fj.get("enabled", False):
         return True, []
 
     not_joined = []
 
-    # بررسی کانال
     if fj.get("require_channel") and fj.get("channel_id"):
         try:
             member = await bot.get_chat_member(chat_id=fj["channel_id"], user_id=int(user_id))
@@ -638,7 +623,6 @@ async def check_membership(bot, user_id):
             logger.error(f"Channel check error: {e}")
             not_joined.append("channel")
 
-    # بررسی گروه
     if fj.get("require_group") and fj.get("group_id"):
         try:
             member = await bot.get_chat_member(chat_id=fj["group_id"], user_id=int(user_id))
@@ -652,15 +636,12 @@ async def check_membership(bot, user_id):
 
 
 async def show_force_join_message(upd, ctx):
-    """پیام عضویت اجباری رو نشون می‌ده"""
     if isinstance(upd, CallbackQuery):
         msg = upd.message
-        user = upd.from_user
         await answer_cb(upd)
         is_callback = True
     else:
         msg = upd.message
-        user = upd.effective_user
         is_callback = False
 
     fj = dm.get_force_join()
@@ -681,36 +662,12 @@ async def show_force_join_message(upd, ctx):
         await msg.reply_text(message, reply_markup=kb)
 
 
-def force_join_middleware(func):
-    """دکوراتور برای بررسی عضویت قبل از اجرای هر تابع"""
-    async def wrapper(upd, ctx, *args, **kwargs):
-        # اگه callback هست و داده‌اش چک عضویت هست، skip کن
-        if isinstance(upd, CallbackQuery) and upd.data == "check_membership":
-            return await func(upd, ctx, *args, **kwargs)
-
-        user = upd.from_user if isinstance(upd, CallbackQuery) else upd.effective_user
-        uid = str(user.id)
-
-        # مالکین و ادمین‌ها معاف
-        if dm.is_admin(uid):
-            return await func(upd, ctx, *args, **kwargs)
-
-        is_member, missing = await check_membership(ctx.bot, uid)
-        if not is_member:
-            await show_force_join_message(upd, ctx)
-            return
-
-        return await func(upd, ctx, *args, **kwargs)
-
-    return wrapper
-
-
 def main_kb(uid):
     kb = [
         ["🛍️ مشاهده محصولات"],
         ["🛒 سبد خرید من", "👤 حساب کاربری"],
         ["💰 کیف پول", "📱 برنامه‌های اتصال"],
-        ["🧪 تست کانفیگ", "🎁 دعوت دوستان"],
+        ["🧪 تست رایگان", "🎁 دعوت دوستان"],
         ["📜 سفارش‌های من", "🔍 پیگیری سفارش"],
         ["📞 پشتیبانی", "ℹ️ راهنما"],
     ]
@@ -738,7 +695,6 @@ async def main_menu(upd, ctx):
         await msg.reply_text("🚫 مسدود هستی.")
         return
 
-    # 🔒 چک عضویت اجباری
     if not dm.is_admin(uid):
         is_member, missing = await check_membership(ctx.bot, uid)
         if not is_member:
@@ -779,10 +735,10 @@ async def cancel(update: Update, context):
 
 
 # =========================================================
-#                     🧪 سیستم تست کانفیگ
+#             🧪 تست رایگان (کاربر کانفیگ می‌گیره)
 # =========================================================
 
-async def test_config_menu(upd, ctx):
+async def test_free_menu(upd, ctx):
     if isinstance(upd, CallbackQuery):
         msg = upd.message
         user = upd.from_user
@@ -798,17 +754,34 @@ async def test_config_menu(upd, ctx):
         await msg.reply_text("🚫 مسدود هستی.")
         return
 
-    # بررسی عضویت
     if not dm.is_admin(uid):
         is_member, missing = await check_membership(ctx.bot, uid)
         if not is_member:
             await show_force_join_message(upd, ctx)
             return
 
+    u = dm.get_user(uid)
+    if u.get("test_used"):
+        text = (
+            "❌ **شما قبلاً از تست رایگان استفاده کردید!**\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "🎯 هر کاربر فقط **یک بار** می‌تونه تست رایگان بگیره.\n\n"
+            "🛍️ برای ادامه، از فروشگاه خرید کن."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🛍️ مشاهده محصولات", callback_data="products_back")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="back_menu")]
+        ])
+        if is_callback:
+            await safe_edit(msg, text, reply_markup=kb)
+        else:
+            await msg.reply_text(text, reply_markup=kb)
+        return
+
     text = (
         "🧪 **تست رایگان کانفیگ**\n"
         "━━━━━━━━━━━━━━━\n\n"
-        "🎁 می‌تونی **یک بار** کانفیگ ما رو تست کنی\n"
+        "🎁 می‌تونی **یک بار** کانفیگ تستی ما رو امتحان کنی\n"
         "✅ سرعت، پینگ و کیفیت رو ببین\n"
         "🚀 اگه راضی بودی، از فروشگاه خرید کن\n\n"
         "📱 **پلتفرم خودت رو انتخاب کن:**"
@@ -826,140 +799,241 @@ async def test_config_menu(upd, ctx):
         await msg.reply_text(text, reply_markup=kb)
 
 
-async def test_platform_selected(upd, ctx, platform):
+async def test_give_config(upd, ctx, platform):
     if isinstance(upd, CallbackQuery):
         msg = upd.message
         user = upd.from_user
-        await answer_cb(upd, f"📱 {platform}")
+        await answer_cb(upd)
     else:
         msg = upd.message
         user = upd.effective_user
 
     uid = str(user.id)
     u = dm.get_user(uid)
-    tests_count = u.get("tests_count", 0)
 
-    if tests_count >= 1:
-        await safe_edit(
-            msg,
-            "❌ **شما قبلاً تست گرفته‌اید!**\n\n"
-            "🎯 هر کاربر فقط یک بار می‌تونه تست رایگان بگیره.\n"
-            "برای استفاده بیشتر، از فروشگاه خرید کن."
-        )
+    if u.get("test_used"):
+        await answer_cb(upd, "❌ قبلاً استفاده کردی!", show_alert=True)
+        await test_free_menu(upd, ctx)
         return
 
-    clear_states(ctx)
-    ctx.user_data['awaiting_test_config'] = True
-    ctx.user_data['test_user_platform'] = platform
-    ctx.user_data['test_target_user'] = uid
+    tc = dm.get_test_configs()
+    configs = tc.get(platform, [])
 
-    await safe_edit(
-        msg,
-        f"📱 پلتفرم: **{platform}**\n\n"
-        "🔗 **حالا کانفیگت رو بفرست:**\n\n"
-        "می‌تونی:\n"
-        "• متن کانفیگ (vless/vmess/ss)\n"
-        "• لینک ساب\n"
-        "• یا فایل کانفیگ\n\n"
-        "⚠️ بعد از ارسال، تیم پشتیبانی بررسی می‌کنه."
+    if not configs:
+        text = (
+            f"❌ **متأسفانه کانفیگ تستی برای این پلتفرم موجود نیست.**\n\n"
+            f"📱 پلتفرم: {platform.title()}\n"
+            f"⏳ لطفاً بعداً امتحان کن یا با پشتیبانی در تماس باش."
+        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="test_menu")]])
+        await safe_edit(msg, text, reply_markup=kb)
+        return
+
+    # انتخاب رندوم
+    chosen = random.choice(configs)
+
+    # علامت‌گذاری کاربر
+    u["test_used"] = True
+    dm.save_data()
+
+    platform_name = {"android": "📱 اندروید", "ios": "🍎 iOS", "windows": "💻 ویندوز"}.get(platform, platform)
+
+    text = (
+        f"🎁 **کانفیگ تست شما آماده است!**\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"{platform_name}\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"```\n{chosen['text']}\n```\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"📌 **راهنمای استفاده:**\n"
+        f"1. کانفیگ بالا رو کپی کن\n"
+        f"2. توی اپ (v2rayNG / Streisand / etc) پیست کن\n"
+        f"3. وصل شو و تست کن\n\n"
+        f"⚠️ این تست فقط **یک بار** بود.\n"
+        f"🚀 اگه راضی بودی از فروشگاه خرید کن!"
     )
 
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛍️ مشاهده محصولات", callback_data="products_back")],
+        [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_menu")]
+    ])
 
-async def handle_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_test_config'):
-        return False
+    try:
+        await safe_edit(msg, text, reply_markup=kb)
+    except Exception:
+        await msg.reply_text(text, reply_markup=kb)
 
-    user = update.effective_user
-    uid = str(user.id)
-    platform = context.user_data.get('test_user_platform', 'نامشخص')
-
-    config_text = ""
-    file_id = None
-    file_type = None
-
-    if update.message.text:
-        config_text = update.message.text
-    elif update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        file_type = "photo"
-        config_text = update.message.caption or "(عکس)"
-    elif update.message.document:
-        file_id = update.message.document.file_id
-        file_type = "document"
-        config_text = update.message.caption or "(فایل)"
-
-    if not config_text and not file_id:
-        await update.message.reply_text("❌ لطفاً کانفیگ، لینک یا فایل بفرست.")
-        return True
-
-    u = dm.get_user(uid)
-    req = {
-        "user_id": uid,
-        "username": u.get("username", ""),
-        "first_name": u.get("first_name", ""),
-        "platform": platform,
-        "config_text": config_text[:1000],
-        "file_id": file_id,
-        "file_type": file_type
-    }
-    tid = dm.add_test_request(req)
-    clear_states(context)
-
-    await update.message.reply_text(
-        f"✅ **درخواست تست ثبت شد**\n\n"
-        f"🆔 کد: `{tid}`\n"
-        f"📱 پلتفرم: {platform}\n\n"
-        f"⏳ تیم پشتیبانی به زودی بررسی می‌کنه"
-    )
-
+    # اطلاع به ادمین‌ها
     ud = user_display(uid, u.get("username", ""))
-    admin_text = (
-        f"🧪 **درخواست تست جدید**\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🆔 `{tid}`\n"
-        f"👤 {ud}\n"
-        f"📛 {u.get('first_name', '-')}\n"
-        f"📱 پلتفرم: {platform}\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"📄 محتوا:\n`{config_text[:500]}`"
-    )
-
     for aid in dm.data["owners"] + dm.data["admins"]:
         try:
-            if file_id and file_type == "photo":
-                await context.bot.send_photo(
-                    int(aid), file_id,
-                    caption=admin_text,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("✅ قبول", callback_data=f"testok_{tid}"),
-                         InlineKeyboardButton("❌ رد", callback_data=f"testno_{tid}")]
-                    ])
-                )
-            elif file_id and file_type == "document":
-                await context.bot.send_document(
-                    int(aid), file_id,
-                    caption=admin_text,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("✅ قبول", callback_data=f"testok_{tid}"),
-                         InlineKeyboardButton("❌ رد", callback_data=f"testno_{tid}")]
-                    ])
-                )
-            else:
-                await context.bot.send_message(
-                    int(aid), admin_text,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("✅ قبول", callback_data=f"testok_{tid}"),
-                         InlineKeyboardButton("❌ رد", callback_data=f"testno_{tid}")]
-                    ])
-                )
+            await ctx.bot.send_message(
+                int(aid),
+                f"🧪 **تست رایگان داده شد**\n"
+                f"👤 {ud}\n"
+                f"📛 {u.get('first_name', '-')}\n"
+                f"📱 پلتفرم: {platform_name}"
+            )
         except Exception:
             pass
 
+
+# =========================================================
+#             🎛️ مدیریت کانفیگ‌های تست (ادمین)
+# =========================================================
+
+async def test_manage_menu(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        user = upd.from_user
+        await answer_cb(upd)
+        is_callback = True
+    else:
+        msg = upd.message
+        user = upd.effective_user
+        is_callback = False
+
+    if not dm.is_owner(user.id):
+        await msg.reply_text("❌ فقط مالکین دسترسی دارن.")
+        return
+
+    tc = dm.get_test_configs()
+    text = (
+        f"🧪 **مدیریت کانفیگ‌های تست**\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"📱 اندروید: **{len(tc.get('android', []))}** کانفیگ\n"
+        f"🍎 iOS: **{len(tc.get('ios', []))}** کانفیگ\n"
+        f"💻 ویندوز: **{len(tc.get('windows', []))}** کانفیگ\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"💡 کاربر با دکمه «🧪 تست رایگان»\n"
+        f"یه کانفیگ رندوم از این لیست دریافت می‌کنه."
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"📱 اندروید ({len(tc.get('android', []))})", callback_data="testm_android")],
+        [InlineKeyboardButton(f"🍎 iOS ({len(tc.get('ios', []))})", callback_data="testm_ios")],
+        [InlineKeyboardButton(f"💻 ویندوز ({len(tc.get('windows', []))})", callback_data="testm_windows")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
+    ])
+
+    if is_callback:
+        await safe_edit(msg, text, reply_markup=kb)
+    else:
+        await msg.reply_text(text, reply_markup=kb)
+
+
+async def test_manage_platform(upd, ctx, platform):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+
+    tc = dm.get_test_configs()
+    configs = tc.get(platform, [])
+    platform_name = {"android": "📱 اندروید", "ios": "🍎 iOS", "windows": "💻 ویندوز"}.get(platform, platform)
+
+    text = f"🧪 **مدیریت کانفیگ‌های {platform_name}**\n━━━━━━━━━━━━━━━\n\n"
+    if not configs:
+        text += "❌ هیچ کانفیگی ثبت نشده."
+    else:
+        for i, c in enumerate(configs, 1):
+            preview = c['text'][:60] + "..." if len(c['text']) > 60 else c['text']
+            text += f"{i}. `{preview}`\n   📅 {c.get('added', '')[:10]}\n\n"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ افزودن کانفیگ", callback_data=f"testadd_{platform}")],
+        [InlineKeyboardButton("🗑️ حذف کانفیگ", callback_data=f"testdel_{platform}")],
+        [InlineKeyboardButton("🧹 حذف همه", callback_data=f"testclr_{platform}")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="test_manage")]
+    ])
+    await safe_edit(msg, text, reply_markup=kb)
+
+
+async def test_add_prompt(upd, ctx, platform):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+    clear_states(ctx)
+    ctx.user_data['awaiting_test_config_add'] = True
+    ctx.user_data['test_platform_target'] = platform
+    platform_name = {"android": "📱 اندروید", "ios": "🍎 iOS", "windows": "💻 ویندوز"}.get(platform, platform)
+    await msg.reply_text(
+        f"➕ **افزودن کانفیگ تست — {platform_name}**\n\n"
+        f"متن کانفیگ رو بفرست:\n"
+        f"(vless://... یا vmess://... یا هر متن دیگه)\n\n"
+        f"برای انصراف /cancel"
+    )
+
+
+async def handle_test_config_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_test_config_add'):
+        return False
+    platform = context.user_data.get('test_platform_target', 'android')
+    text = update.message.text.strip()
+    if not text:
+        await update.message.reply_text("❌ متن خالیه.")
+        return True
+
+    dm.add_test_config(platform, text)
+    platform_name = {"android": "📱 اندروید", "ios": "🍎 iOS", "windows": "💻 ویندوز"}.get(platform, platform)
+    clear_states(context)
+    await update.message.reply_text(
+        f"✅ کانفیگ به {platform_name} اضافه شد.\n\n"
+        f"📊 تعداد کل: {len(dm.get_test_configs().get(platform, []))}"
+    )
     return True
 
 
+async def test_del_menu(upd, ctx, platform):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+
+    tc = dm.get_test_configs()
+    configs = tc.get(platform, [])
+    if not configs:
+        await msg.reply_text("❌ کانفیگی نیست.")
+        return
+
+    kb = []
+    for i, c in enumerate(configs):
+        preview = c['text'][:40] + "..." if len(c['text']) > 40 else c['text']
+        kb.append([InlineKeyboardButton(f"❌ {i+1}. {preview}", callback_data=f"testdelok_{platform}_{i}")])
+    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f"testm_{platform}")])
+
+    await safe_edit(msg, "کدوم کانفیگ رو حذف کنم؟", reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def test_del_execute(upd, ctx, platform, idx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd, "حذف شد")
+    else:
+        msg = upd.message
+    removed = dm.remove_test_config(platform, idx)
+    if removed:
+        await test_manage_platform(upd, ctx, platform)
+    else:
+        await msg.reply_text("❌ پیدا نشد.")
+
+
+async def test_clear_execute(upd, ctx, platform):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+    n = dm.clear_test_configs(platform)
+    await answer_cb(upd, f"✅ {n} کانفیگ حذف شد", show_alert=True)
+    await test_manage_platform(upd, ctx, platform)
+
+
 # =========================================================
-#                     برنامه‌های اتصال
+#                     بقیه کد
 # =========================================================
 
 async def show_apps(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -972,20 +1046,10 @@ async def show_apps(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for app in apps:
         try:
             if app.get("file_id"):
-                await context.bot.send_document(
-                    update.effective_user.id,
-                    app["file_id"],
-                    caption=f"📱 {app.get('name', 'برنامه')}"
-                )
-            elif app.get("link"):
-                await update.message.reply_text(f"📱 {app.get('name', 'برنامه')}\n{app['link']}")
+                await context.bot.send_document(update.effective_user.id, app["file_id"], caption=f"📱 {app.get('name', 'برنامه')}")
         except Exception as e:
             logger.error(f"App send err: {e}")
 
-
-# =========================================================
-#                     محصولات
-# =========================================================
 
 async def show_products(upd, ctx):
     clear_states(ctx)
@@ -1024,10 +1088,7 @@ async def show_products(upd, ctx):
     kb = []
     for p in products:
         c = "🟢" if p.get("stock", 0) > 0 else "🔴"
-        kb.append([InlineKeyboardButton(
-            f"{c} {p['name']} ┃ {fmt(p['price'])} ت",
-            callback_data=f"prod_{p['id']}"
-        )])
+        kb.append([InlineKeyboardButton(f"{c} {p['name']} ┃ {fmt(p['price'])} ت", callback_data=f"prod_{p['id']}")])
     kb.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_menu")])
     markup = InlineKeyboardMarkup(kb)
 
@@ -1055,8 +1116,7 @@ async def product_details(upd, ctx, pid):
     stock_status = "🟢 موجود" if stock > 0 else "🔴 ناموجود"
 
     text = (
-        f"🎯 **{p['name']}**\n"
-        f"━━━━━━━━━━━━━━━\n"
+        f"🎯 **{p['name']}**\n━━━━━━━━━━━━━━━\n"
         f"💰 قیمت: **{fmt(p['price'])} تومان**\n"
         f"📦 موجودی: {stock} عدد\n"
         f"🔑 کانفیگ آماده: {configs_count}\n"
@@ -1069,8 +1129,7 @@ async def product_details(upd, ctx, pid):
     if stock > 0:
         kb.append([InlineKeyboardButton("🛒 افزودن به سبد خرید", callback_data=f"cartadd_{pid}")])
     kb.append([InlineKeyboardButton("🔙 بازگشت به محصولات", callback_data="products_back")])
-    markup = InlineKeyboardMarkup(kb)
-    await safe_edit(msg, text, reply_markup=markup)
+    await safe_edit(msg, text, reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def add_to_cart_cb(upd, ctx, pid):
@@ -1079,22 +1138,16 @@ async def add_to_cart_cb(upd, ctx, pid):
         await answer_cb(upd)
     else:
         user = upd.effective_user
-
     p = dm.get_product(pid)
     if not p or p.get("stock", 0) <= 0:
         await answer_cb(upd, "❌ ناموجود", show_alert=True)
         return
-
     if dm.add_to_cart(str(user.id), pid):
         await answer_cb(upd, "✅ به سبد اضافه شد")
         await show_cart(upd, ctx)
     else:
         await answer_cb(upd, "⚠️ قبلاً در سبد هست", show_alert=True)
 
-
-# =========================================================
-#                     سبد خرید
-# =========================================================
 
 async def show_cart(upd, ctx):
     if isinstance(upd, CallbackQuery):
@@ -1128,24 +1181,16 @@ async def show_cart(upd, ctx):
     text = "🛒 **سبد خرید شما**\n━━━━━━━━━━━━━━━\n\n"
     for i, it in enumerate(cart, 1):
         text += f"{i}️⃣ {it['name']}\n     💵 {fmt(it['price'])} تومان\n"
-
     text += f"\n━━━━━━━━━━━━━━━\n💰 **جمع کل:** {fmt(total)} تومان"
 
     if discount:
         new_total = int(total * (100 - discount['percent']) / 100)
         off = total - new_total
-        text += (
-            f"\n🎟️ تخفیف: {discount['percent']}% ({fmt(off)} ت)"
-            f"\n💵 **قابل پرداخت:** {fmt(new_total)} تومان"
-        )
+        text += f"\n🎟️ تخفیف: {discount['percent']}% ({fmt(off)} ت)\n💵 **قابل پرداخت:** {fmt(new_total)} تومان"
 
     buttons = []
     for i, it in enumerate(cart):
-        buttons.append([InlineKeyboardButton(
-            f"❌ حذف {it['name']}",
-            callback_data=f"cartdel_{i}"
-        )])
-
+        buttons.append([InlineKeyboardButton(f"❌ حذف {it['name']}", callback_data=f"cartdel_{i}")])
     buttons.append([InlineKeyboardButton("🎟️ اعمال کد تخفیف", callback_data="apply_coupon")])
     buttons.append([InlineKeyboardButton("✅ پرداخت با کیف پول", callback_data="checkout")])
     buttons.append([
@@ -1167,8 +1212,7 @@ async def remove_cart_item(upd, ctx, idx):
         await answer_cb(upd, "حذف شد")
     else:
         user = upd.effective_user
-    uid = str(user.id)
-    dm.remove_from_cart(uid, idx)
+    dm.remove_from_cart(str(user.id), idx)
     await show_cart(upd, ctx)
 
 
@@ -1204,13 +1248,7 @@ async def checkout(upd, ctx):
 
     bal = dm.get_user(uid).get("balance", 0)
     if bal < total:
-        text = (
-            f"❌ **موجودی کافی نیست**\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"💰 موجودی: {fmt(bal)} ت\n"
-            f"💵 نیاز: {fmt(total)} ت\n"
-            f"📉 کمبود: {fmt(total - bal)} ت"
-        )
+        text = f"❌ **موجودی کافی نیست**\n━━━━━━━━━━━━━━━\n💰 موجودی: {fmt(bal)} ت\n💵 نیاز: {fmt(total)} ت\n📉 کمبود: {fmt(total - bal)} ت"
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("💰 شارژ کیف پول", callback_data="request_topup")],
             [InlineKeyboardButton("🔙 بازگشت به سبد", callback_data="show_cart")]
@@ -1218,20 +1256,10 @@ async def checkout(upd, ctx):
         await safe_edit(msg, text, reply_markup=kb)
         return
 
-    text = (
-        f"✅ **تأیید نهایی خرید**\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"📦 تعداد: {len(cart)} آیتم\n"
-    )
+    text = f"✅ **تأیید نهایی خرید**\n━━━━━━━━━━━━━━━\n📦 تعداد: {len(cart)} آیتم\n"
     if discount:
         text += f"🎟️ تخفیف: {discount['percent']}%\n"
-    text += (
-        f"💰 مبلغ: {fmt(total)} تومان\n"
-        f"💳 موجودی: {fmt(bal)} تومان\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"مطمئنی؟"
-    )
-
+    text += f"💰 مبلغ: {fmt(total)} تومان\n💳 موجودی: {fmt(bal)} تومان\n━━━━━━━━━━━━━━━\nمطمئنی؟"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ بله، پرداخت کن", callback_data="pay_wallet")],
         [InlineKeyboardButton("❌ انصراف", callback_data="show_cart")]
@@ -1267,15 +1295,10 @@ async def pay_wallet(upd, ctx):
 
     u["balance"] -= total
     order = {
-        "user_id": uid,
-        "username": u.get("username", ""),
-        "first_name": u.get("first_name", ""),
-        "items": cart.copy(),
-        "total": total,
+        "user_id": uid, "username": u.get("username", ""), "first_name": u.get("first_name", ""),
+        "items": cart.copy(), "total": total,
         "discount": discount['percent'] if discount else 0,
-        "status": "waiting_admin",
-        "payment_method": "wallet",
-        "account_info": None
+        "status": "waiting_admin", "payment_method": "wallet", "account_info": None
     }
     oid = dm.add_order(order)
     dm.clear_cart(uid)
@@ -1283,34 +1306,15 @@ async def pay_wallet(upd, ctx):
 
     ud = user_display(uid, u.get("username", ""))
     items_str = "\n".join(f"• {i['name']} - {fmt(i['price'])} ت" for i in cart)
-    text = (
-        f"✅ **پرداخت موفق!**\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🆔 کد سفارش: `{oid}`\n"
-        f"💰 مبلغ: {fmt(total)} تومان\n"
-        f"📦 تعداد: {len(cart)}\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"⏳ منتظر تأیید ادمین باش"
-    )
+    text = f"✅ **پرداخت موفق!**\n━━━━━━━━━━━━━━━\n🆔 کد سفارش: `{oid}`\n💰 مبلغ: {fmt(total)} تومان\n📦 تعداد: {len(cart)}\n━━━━━━━━━━━━━━━\n⏳ منتظر تأیید ادمین باش"
     await safe_edit(msg, text)
 
     for aid in dm.data["owners"] + dm.data["admins"]:
         try:
-            await ctx.bot.send_message(
-                int(aid),
-                f"🛒 **سفارش جدید**\n"
-                f"🆔 `{oid}`\n"
-                f"👤 {ud}\n"
-                f"📦 {items_str}\n"
-                f"💰 {fmt(total)} ت"
-            )
+            await ctx.bot.send_message(int(aid), f"🛒 **سفارش جدید**\n🆔 `{oid}`\n👤 {ud}\n📦 {items_str}\n💰 {fmt(total)} ت")
         except Exception:
             pass
 
-
-# =========================================================
-#                     کد تخفیف
-# =========================================================
 
 async def apply_coupon_prompt(upd, ctx):
     if isinstance(upd, CallbackQuery):
@@ -1343,10 +1347,6 @@ async def handle_coupon_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     await show_cart(update, context)
 
 
-# =========================================================
-#                     کیف پول
-# =========================================================
-
 async def wallet_menu(upd, ctx):
     if isinstance(upd, CallbackQuery):
         msg = upd.message
@@ -1360,12 +1360,7 @@ async def wallet_menu(upd, ctx):
 
     uid = str(user.id)
     bal = dm.get_user(uid).get("balance", 0)
-    text = (
-        f"💰 **کیف پول شما**\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"💳 موجودی: **{fmt(bal)} تومان**\n"
-        f"━━━━━━━━━━━━━━━"
-    )
+    text = f"💰 **کیف پول شما**\n━━━━━━━━━━━━━━━\n💳 موجودی: **{fmt(bal)} تومان**\n━━━━━━━━━━━━━━━"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ درخواست شارژ", callback_data="request_topup")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="back_menu")]
@@ -1386,11 +1381,8 @@ async def request_topup_start(upd, ctx):
     ctx.user_data['awaiting_topup_amount'] = True
     card = get_active_card()
     await msg.reply_text(
-        f"💰 **مبلغ شارژ رو به تومان بنویس:**\n"
-        f"(مثال: 50000)\n\n"
-        f"💳 کارت: `{card['number']}`\n"
-        f"👤 {card.get('holder', '')}\n\n"
-        f"برای انصراف /cancel"
+        f"💰 **مبلغ شارژ رو به تومان بنویس:**\n(مثال: 50000)\n\n"
+        f"💳 کارت: `{card['number']}`\n👤 {card.get('holder', '')}\n\nبرای انصراف /cancel"
     )
 
 
@@ -1431,23 +1423,14 @@ async def handle_topup_receipt(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
     uid = str(user.id)
     u = dm.get_user(uid)
-    req = {
-        "user_id": uid, "username": u.get("username", ""),
-        "first_name": u.get("first_name", ""),
-        "amount": amount, "receipt_photo": file_id
-    }
+    req = {"user_id": uid, "username": u.get("username", ""), "first_name": u.get("first_name", ""), "amount": amount, "receipt_photo": file_id}
     rid = dm.add_topup(req)
     ud = user_display(uid, u.get("username", ""))
     clear_states(context)
-    await update.message.reply_text(
-        f"✅ **درخواست شارژ ثبت شد**\n🆔 `{rid}`\nمنتظر تأیید ادمین باش."
-    )
+    await update.message.reply_text(f"✅ **درخواست شارژ ثبت شد**\n🆔 `{rid}`\nمنتظر تأیید ادمین باش.")
     for aid in dm.data["owners"] + dm.data["admins"]:
         try:
-            await context.bot.send_photo(
-                int(aid), file_id,
-                caption=f"💰 **شارژ جدید**\n🆔 `{rid}`\n👤 {ud}\n💰 {fmt(amount)} ت"
-            )
+            await context.bot.send_photo(int(aid), file_id, caption=f"💰 **شارژ جدید**\n🆔 `{rid}`\n👤 {ud}\n💰 {fmt(amount)} ت")
         except Exception:
             pass
     return True
@@ -1458,17 +1441,14 @@ async def show_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(user.id)
     u = dm.get_user(uid)
     ud = user_display(uid, user.username)
-    invited = u.get("invited_count", 0)
-    tests = u.get("tests_count", 0)
+    test_status = "✅ استفاده شده" if u.get("test_used") else "❌ استفاده نشده"
     await update.message.reply_text(
-        f"👤 **حساب کاربری شما**\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🆔 {ud}\n"
-        f"📛 {u.get('first_name', '-')}\n"
+        f"👤 **حساب کاربری شما**\n━━━━━━━━━━━━━━━\n"
+        f"🆔 {ud}\n📛 {u.get('first_name', '-')}\n"
         f"💰 موجودی: {fmt(u.get('balance', 0))} ت\n"
         f"📦 سفارشات: {len(u.get('orders', []))}\n"
-        f"🧪 تست‌ها: {tests}\n"
-        f"🎁 دعوت‌شده‌ها: {invited}",
+        f"🧪 تست: {test_status}\n"
+        f"🎁 دعوت‌شده‌ها: {u.get('invited_count', 0)}",
         reply_markup=main_kb(uid)
     )
 
@@ -1492,13 +1472,10 @@ async def show_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invited = u.get("invited_count", 0)
     total_earned = invited * bonus
     text = (
-        f"🎁 **دعوت دوستان**\n"
-        f"━━━━━━━━━━━━━━━\n"
+        f"🎁 **دعوت دوستان**\n━━━━━━━━━━━━━━━\n"
         f"با دعوت هر دوست، {fmt(bonus)} تومان هدیه بگیر!\n\n"
         f"🔗 **لینک دعوت تو:**\n{link}\n\n"
-        f"📊 **آمار تو:**\n"
-        f"👥 دعوت‌شده‌ها: {invited}\n"
-        f"💰 مجموع درآمد: {fmt(total_earned)} ت"
+        f"📊 **آمار تو:**\n👥 دعوت‌شده‌ها: {invited}\n💰 مجموع درآمد: {fmt(total_earned)} ت"
     )
     await update.message.reply_text(text, reply_markup=main_kb(uid))
 
@@ -1513,16 +1490,8 @@ async def show_my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     orders = sorted(orders, key=lambda x: x.get("date", ""), reverse=True)[:10]
     text = "📜 **آخرین سفارش‌های شما**\n━━━━━━━━━━━━━━━\n\n"
     for o in orders:
-        status_emoji = {
-            "waiting_admin": "⏳ در انتظار",
-            "completed": "✅ تکمیل شده",
-            "rejected": "❌ رد شده"
-        }.get(o.get("status"), "❓")
-        text += (
-            f"{status_emoji}\n"
-            f"🆔 {o['order_id']}\n"
-            f"💰 {fmt(o['total'])} ت | 📅 {o.get('date', '')[:10]}\n\n"
-        )
+        status_emoji = {"waiting_admin": "⏳ در انتظار", "completed": "✅ تکمیل شده", "rejected": "❌ رد شده"}.get(o.get("status"), "❓")
+        text += f"{status_emoji}\n🆔 {o['order_id']}\n💰 {fmt(o['total'])} ت | 📅 {o.get('date', '')[:10]}\n\n"
     await send_long_message(update, text)
 
 
@@ -1541,21 +1510,9 @@ async def handle_track_order(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ سفارش با این کد پیدا نشد.")
         context.user_data.pop('awaiting_order_track', None)
         return
-    status_text = {
-        "waiting_admin": "⏳ در انتظار تأیید ادمین",
-        "completed": "✅ تکمیل شده",
-        "rejected": "❌ رد شده"
-    }.get(o.get("status"), "❓ نامشخص")
+    status_text = {"waiting_admin": "⏳ در انتظار تأیید ادمین", "completed": "✅ تکمیل شده", "rejected": "❌ رد شده"}.get(o.get("status"), "❓ نامشخص")
     items_str = "\n".join(f"• {i['name']}" for i in o.get("items", []))
-    text = (
-        f"🔍 **سفارش {oid}**\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"📌 وضعیت: {status_text}\n"
-        f"💰 مبلغ: {fmt(o['total'])} ت\n"
-        f"📅 تاریخ: {o.get('date', '')}\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"📦 محصولات:\n{items_str}"
-    )
+    text = f"🔍 **سفارش {oid}**\n━━━━━━━━━━━━━━━\n📌 وضعیت: {status_text}\n💰 مبلغ: {fmt(o['total'])} ت\n📅 تاریخ: {o.get('date', '')}\n━━━━━━━━━━━━━━━\n📦 محصولات:\n{items_str}"
     await update.message.reply_text(text, reply_markup=main_kb(update.effective_user.id))
     context.user_data.pop('awaiting_order_track', None)
 
@@ -1600,11 +1557,10 @@ async def admin_panel(upd, ctx):
             ["🚫 مسدود/آزاد", "🎟️ کد تخفیف"],
             ["🎁 تنظیمات رفرال", "💳 مدیریت کارت‌ها"],
             ["📱 مدیریت برنامه‌ها", "📝 پیام خوش‌آمد"],
+            ["🧪 مدیریت تست‌ها", "🔒 عضویت اجباری"],
             ["🛠 پشتیبانی", "📝 راهنمای کاربر"],
             ["👑 مدیریت مالکین", "🛡 مدیریت ادمین‌ها"],
             ["📜 لاگ تغییرات", "✉️ پیام به کاربر"],
-            ["🧪 مدیریت تست‌ها", "📊 آمار تست‌ها"],
-            ["🔒 عضویت اجباری"],
             ["🛒 باز/بستن فروشگاه"],
             ["📢 پیام همگانی", "🗑️ حذف آخرین پیام"],
             ["🔙 بازگشت"]
@@ -1617,15 +1573,11 @@ async def admin_panel(upd, ctx):
             ["📈 آمار فروش", "👥 آمار کاربران"],
             ["🔍 جستجوی کاربر", "💰 درخواست شارژ"],
             ["💰 کیف پول کاربر", "👤 بررسی کاربر"],
-            ["🚫 مسدود/آزاد", "🧪 مدیریت تست‌ها"],
+            ["🚫 مسدود/آزاد"],
             ["🔙 بازگشت"]
         ]
     await msg.reply_text("⚙️ **پنل مدیریت**", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
-
-# =========================================================
-#             🔒 مدیریت عضویت اجباری
-# =========================================================
 
 async def force_join_menu(upd, ctx):
     if isinstance(upd, CallbackQuery):
@@ -1646,25 +1598,14 @@ async def force_join_menu(upd, ctx):
     status = "✅ فعال" if fj.get("enabled") else "❌ غیرفعال"
 
     text = (
-        f"🔒 **مدیریت عضویت اجباری**\n"
-        f"━━━━━━━━━━━━━━━\n"
+        f"🔒 **مدیریت عضویت اجباری**\n━━━━━━━━━━━━━━━\n"
         f"📊 وضعیت کلی: {status}\n\n"
-        f"📢 کانال:\n"
-        f"   • نیاز: {'✅' if fj.get('require_channel') else '❌'}\n"
-        f"   • آیدی: `{fj.get('channel_id') or 'تنظیم نشده'}`\n"
-        f"   • لینک: {fj.get('channel_link') or 'تنظیم نشده'}\n\n"
-        f"👥 گروه:\n"
-        f"   • نیاز: {'✅' if fj.get('require_group') else '❌'}\n"
-        f"   • آیدی: `{fj.get('group_id') or 'تنظیم نشده'}`\n"
-        f"   • لینک: {fj.get('group_link') or 'تنظیم نشده'}\n"
-        f"━━━━━━━━━━━━━━━"
+        f"📢 کانال:\n   • نیاز: {'✅' if fj.get('require_channel') else '❌'}\n   • آیدی: `{fj.get('channel_id') or 'تنظیم نشده'}`\n   • لینک: {fj.get('channel_link') or 'تنظیم نشده'}\n\n"
+        f"👥 گروه:\n   • نیاز: {'✅' if fj.get('require_group') else '❌'}\n   • آیدی: `{fj.get('group_id') or 'تنظیم نشده'}`\n   • لینک: {fj.get('group_link') or 'تنظیم نشده'}\n━━━━━━━━━━━━━━━"
     )
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            f"{'🔴 غیرفعال کن' if fj.get('enabled') else '🟢 فعال کن'}",
-            callback_data="fj_toggle"
-        )],
+        [InlineKeyboardButton(f"{'🔴 غیرفعال کن' if fj.get('enabled') else '🟢 فعال کن'}", callback_data="fj_toggle")],
         [InlineKeyboardButton("📢 تنظیم کانال", callback_data="fj_channel")],
         [InlineKeyboardButton("👥 تنظیم گروه", callback_data="fj_group")],
         [InlineKeyboardButton("📝 تغییر پیام", callback_data="fj_message")],
@@ -1683,7 +1624,6 @@ async def fj_toggle(upd, ctx):
         await answer_cb(upd)
     else:
         msg = upd.message
-
     fj = dm.get_force_join()
     new_state = not fj.get("enabled", False)
     dm.set_force_join({"enabled": new_state})
@@ -1697,16 +1637,12 @@ async def fj_channel_prompt(upd, ctx):
         await answer_cb(upd)
     else:
         msg = upd.message
-
     clear_states(ctx)
     ctx.user_data['awaiting_channel_id'] = True
     await msg.reply_text(
-        "📢 **تنظیم کانال**\n\n"
-        "🔹 مرحله ۱ از ۲\n\n"
-        "آیدی عددی کانال رو بفرست:\n"
-        "مثال: `-1001234567890`\n\n"
-        "💡 برای گرفتن آیدی:\n"
-        "کانال رو به @userinfobot فوروارد کن\n\n"
+        "📢 **تنظیم کانال**\n\n🔹 مرحله ۱ از ۲\n\n"
+        "آیدی عددی کانال رو بفرست:\nمثال: `-1001234567890`\n\n"
+        "💡 برای گرفتن آیدی: کانال رو به @userinfobot فوروارد کن\n\n"
         "برای حذف کانال، بنویس: `حذف`"
     )
 
@@ -1715,27 +1651,18 @@ async def handle_channel_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('awaiting_channel_id'):
         return False
     text = update.message.text.strip()
-
     if text == "حذف":
         dm.set_force_join({"channel_id": "", "channel_link": "", "require_channel": False})
         clear_states(context)
         await update.message.reply_text("✅ کانال حذف شد.")
         return True
-
-    # قبول هم آیدی عددی، هم لینک
     channel_id = text
     if text.startswith("https://t.me/"):
         channel_id = "@" + text.replace("https://t.me/", "")
-
     context.user_data['new_channel_id'] = channel_id
     context.user_data['awaiting_channel_id'] = False
     context.user_data['awaiting_channel_link'] = True
-    await update.message.reply_text(
-        "✅ ثبت شد\n\n"
-        "🔹 مرحله ۲ از ۲\n\n"
-        "حالا لینک کانال رو بفرست:\n"
-        "مثال: `https://t.me/your_channel`"
-    )
+    await update.message.reply_text("✅ ثبت شد\n\n🔹 مرحله ۲ از ۲\n\nحالا لینک کانال رو بفرست:\nمثال: `https://t.me/your_channel`")
     return True
 
 
@@ -1744,37 +1671,15 @@ async def handle_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         return False
     link = update.message.text.strip()
     channel_id = context.user_data.get('new_channel_id')
-
-    # چک کن ربات توی کانال ادمینه
     try:
-        chat = await context.bot.get_chat(channel_id)
         bot_member = await context.bot.get_chat_member(channel_id, context.bot.id)
         if bot_member.status not in ["administrator", "creator"]:
-            await update.message.reply_text(
-                "⚠️ **هشدار:** ربات توی این کانال ادمین نیست!\n\n"
-                "برای بررسی عضویت، ربات باید ادمین کانال باشه.\n"
-                "لطفاً ربات رو ادمین کن و دوباره امتحان کن.\n\n"
-                "ادامه می‌دم ولی ممکنه کار نکنه."
-            )
+            await update.message.reply_text("⚠️ **هشدار:** ربات توی این کانال ادمین نیست!\nادامه می‌دم ولی ممکنه کار نکنه.")
     except Exception as e:
-        await update.message.reply_text(
-            f"⚠️ نتونستم کانال رو چک کنم: {e}\n\n"
-            f"مطمئن شو ربات توی کانال ادمینه.\n"
-            f"ادامه می‌دم."
-        )
-
-    dm.set_force_join({
-        "channel_id": channel_id,
-        "channel_link": link,
-        "require_channel": True
-    })
+        await update.message.reply_text(f"⚠️ نتونستم چک کنم: {e}\nادامه می‌دم.")
+    dm.set_force_join({"channel_id": channel_id, "channel_link": link, "require_channel": True})
     clear_states(context)
-    await update.message.reply_text(
-        f"✅ **کانال تنظیم شد**\n\n"
-        f"📢 آیدی: `{channel_id}`\n"
-        f"🔗 لینک: {link}\n"
-        f"✅ نیاز به عضویت: فعال"
-    )
+    await update.message.reply_text(f"✅ **کانال تنظیم شد**\n📢 `{channel_id}`\n🔗 {link}")
     return True
 
 
@@ -1784,16 +1689,11 @@ async def fj_group_prompt(upd, ctx):
         await answer_cb(upd)
     else:
         msg = upd.message
-
     clear_states(ctx)
     ctx.user_data['awaiting_group_id'] = True
     await msg.reply_text(
-        "👥 **تنظیم گروه**\n\n"
-        "🔹 مرحله ۱ از ۲\n\n"
-        "آیدی عددی گروه رو بفرست:\n"
-        "مثال: `-1001234567890`\n\n"
-        "💡 برای گرفتن آیدی:\n"
-        "گروه رو به @userinfobot فوروارد کن\n\n"
+        "👥 **تنظیم گروه**\n\n🔹 مرحله ۱ از ۲\n\n"
+        "آیدی عددی گروه رو بفرست:\nمثال: `-1001234567890`\n\n"
         "برای حذف گروه، بنویس: `حذف`"
     )
 
@@ -1802,26 +1702,18 @@ async def handle_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('awaiting_group_id'):
         return False
     text = update.message.text.strip()
-
     if text == "حذف":
         dm.set_force_join({"group_id": "", "group_link": "", "require_group": False})
         clear_states(context)
         await update.message.reply_text("✅ گروه حذف شد.")
         return True
-
     group_id = text
     if text.startswith("https://t.me/"):
         group_id = "@" + text.replace("https://t.me/", "")
-
     context.user_data['new_group_id'] = group_id
     context.user_data['awaiting_group_id'] = False
     context.user_data['awaiting_group_link'] = True
-    await update.message.reply_text(
-        "✅ ثبت شد\n\n"
-        "🔹 مرحله ۲ از ۲\n\n"
-        "حالا لینک گروه رو بفرست:\n"
-        "مثال: `https://t.me/your_group`"
-    )
+    await update.message.reply_text("✅ ثبت شد\n\n🔹 مرحله ۲ از ۲\n\nحالا لینک گروه رو بفرست:")
     return True
 
 
@@ -1830,34 +1722,15 @@ async def handle_group_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return False
     link = update.message.text.strip()
     group_id = context.user_data.get('new_group_id')
-
     try:
-        chat = await context.bot.get_chat(group_id)
         bot_member = await context.bot.get_chat_member(group_id, context.bot.id)
         if bot_member.status not in ["administrator", "creator", "member"]:
-            await update.message.reply_text(
-                "⚠️ **هشدار:** ربات توی این گروه نیست!\n\n"
-                "برای بررسی عضویت، ربات باید توی گروه باشه.\n\n"
-                "ادامه می‌دم ولی ممکنه کار نکنه."
-            )
+            await update.message.reply_text("⚠️ ربات توی گروه نیست!\nادامه می‌دم.")
     except Exception as e:
-        await update.message.reply_text(
-            f"⚠️ نتونستم گروه رو چک کنم: {e}\n\n"
-            f"ادامه می‌دم."
-        )
-
-    dm.set_force_join({
-        "group_id": group_id,
-        "group_link": link,
-        "require_group": True
-    })
+        await update.message.reply_text(f"⚠️ نتونستم چک کنم: {e}")
+    dm.set_force_join({"group_id": group_id, "group_link": link, "require_group": True})
     clear_states(context)
-    await update.message.reply_text(
-        f"✅ **گروه تنظیم شد**\n\n"
-        f"👥 آیدی: `{group_id}`\n"
-        f"🔗 لینک: {link}\n"
-        f"✅ نیاز به عضویت: فعال"
-    )
+    await update.message.reply_text(f"✅ **گروه تنظیم شد**\n👥 `{group_id}`\n🔗 {link}")
     return True
 
 
@@ -1867,15 +1740,10 @@ async def fj_message_prompt(upd, ctx):
         await answer_cb(upd)
     else:
         msg = upd.message
-
     clear_states(ctx)
     ctx.user_data['awaiting_forced_message'] = True
     current = dm.get_force_join().get("message", "")
-    await msg.reply_text(
-        f"📝 **تغییر پیام عضویت اجباری**\n\n"
-        f"متن فعلی:\n{current}\n\n"
-        f"متن جدید رو بنویس:"
-    )
+    await msg.reply_text(f"📝 **تغییر پیام عضویت اجباری**\n\nمتن فعلی:\n{current}\n\nمتن جدید رو بنویس:")
 
 
 async def handle_forced_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1887,10 +1755,6 @@ async def handle_forced_message(update: Update, context: ContextTypes.DEFAULT_TY
     return True
 
 
-# =========================================================
-#             ادامه پنل ادمین
-# =========================================================
-
 async def toggle_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dm.is_admin(update.effective_user.id):
         return
@@ -1898,10 +1762,7 @@ async def toggle_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new = not cur["is_open"]
     dm.data["shop_status"]["is_open"] = new
     dm.save_data()
-    if new:
-        await update.message.reply_text("✅ فروشگاه باز شد.")
-    else:
-        await update.message.reply_text("🔒 فروشگاه بسته شد.")
+    await update.message.reply_text("✅ فروشگاه باز شد." if new else "🔒 فروشگاه بسته شد.")
 
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1913,249 +1774,19 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     products = dm.data["products"]
     total_stock = sum(p.get("stock", 0) for p in products)
 
-    test_stats = dm.get_test_stats()
-    total_tests = test_stats.get("total_tests", 0)
-    unique_testers = len(test_stats.get("unique_users", []))
+    tc = dm.get_test_configs()
+    total_test_configs = len(tc.get('android', [])) + len(tc.get('ios', [])) + len(tc.get('windows', []))
+    tested_users = sum(1 for u in dm.data["users"].values() if u.get("test_used"))
 
     await update.message.reply_text(
-        f"📊 **آمار ربات**\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"👥 کاربران: {users}\n"
-        f"📦 محصولات: {len(products)}\n"
-        f"📊 موجودی کل: {total_stock}\n"
-        f"🛒 کل سفارش: {len(orders)}\n"
-        f"⏳ در انتظار: {len(pending)}\n"
-        f"✅ تکمیل: {len(completed)}\n"
-        f"💰 درآمد: {fmt(revenue)} ت\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🧪 کل تست‌ها: {total_tests}\n"
-        f"👤 کاربران تست‌کننده: {unique_testers}"
+        f"📊 **آمار ربات**\n━━━━━━━━━━━━━━━\n"
+        f"👥 کاربران: {users}\n📦 محصولات: {len(products)}\n"
+        f"📊 موجودی کل: {total_stock}\n🛒 کل سفارش: {len(orders)}\n"
+        f"⏳ در انتظار: {len(pending)}\n✅ تکمیل: {len(completed)}\n"
+        f"💰 درآمد: {fmt(revenue)} ت\n━━━━━━━━━━━━━━━\n"
+        f"🧪 کانفیگ‌های تست: {total_test_configs}\n"
+        f"👤 کاربران تست‌کننده: {tested_users}"
     )
-
-
-async def show_test_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not dm.is_owner(update.effective_user.id):
-        return
-    stats = dm.get_test_stats()
-    total = stats.get("total_tests", 0)
-    unique_ids = stats.get("unique_users", [])
-
-    text = (
-        f"📊 **آمار تست کانفیگ**\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🧪 کل تست‌ها: **{total}**\n"
-        f"👤 کاربران یکتا: **{len(unique_ids)}**\n"
-        f"━━━━━━━━━━━━━━━\n"
-    )
-
-    if unique_ids:
-        text += "👥 **لیست کاربران تست‌کننده:**\n\n"
-        recent = unique_ids[-20:]
-        for i, uid in enumerate(recent, 1):
-            u = dm.data["users"].get(str(uid), {})
-            name = u.get("first_name", "?") or "?"
-            uname = u.get("username", "")
-            tests = u.get("tests_count", 0)
-            uname_str = f"@{uname}" if uname else "—"
-            text += f"{i}. {name} | {uname_str}\n   🆔 `{uid}` | 🧪 {tests} تست\n\n"
-        if len(unique_ids) > 20:
-            text += f"... و {len(unique_ids) - 20} کاربر دیگه"
-
-    await send_long_message(update, text)
-
-
-async def show_tests_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not dm.is_admin(update.effective_user.id):
-        return
-
-    tests = dm.data.get("test_requests", [])
-    pending = [t for t in tests if t.get("status") == "pending"]
-    approved = [t for t in tests if t.get("status") == "approved"]
-    rejected = [t for t in tests if t.get("status") == "rejected"]
-
-    text = (
-        f"🧪 **مدیریت تست‌ها**\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"⏳ در انتظار: {len(pending)}\n"
-        f"✅ تأیید شده: {len(approved)}\n"
-        f"❌ رد شده: {len(rejected)}\n"
-        f"📊 کل: {len(tests)}"
-    )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"⏳ در انتظار ({len(pending)})", callback_data="tests_pending")],
-        [InlineKeyboardButton(f"✅ تأیید شده ({len(approved)})", callback_data="tests_approved")],
-        [InlineKeyboardButton(f"❌ رد شده ({len(rejected)})", callback_data="tests_rejected")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
-    ])
-    await update.message.reply_text(text, reply_markup=kb)
-
-
-async def show_tests_by_status(upd, ctx, status):
-    if isinstance(upd, CallbackQuery):
-        msg = upd.message
-        await answer_cb(upd)
-        is_callback = True
-    else:
-        msg = upd.message
-        is_callback = False
-
-    tests = [t for t in dm.data.get("test_requests", []) if t.get("status") == status]
-    tests = sorted(tests, key=lambda x: x.get("date", ""), reverse=True)
-
-    if not tests:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="tests_menu_back")]])
-        label = {"pending": "⏳ در انتظار", "approved": "✅ تأیید شده", "rejected": "❌ رد شده"}.get(status, "")
-        if is_callback:
-            await safe_edit(msg, f"📭 هیچ تستی با وضعیت «{label}» نیست.", reply_markup=kb)
-        else:
-            await msg.reply_text(f"📭 هیچ تستی با وضعیت «{label}» نیست.", reply_markup=kb)
-        return
-
-    kb = []
-    for t in tests[:20]:
-        u = dm.data["users"].get(str(t['user_id']), {})
-        name = u.get("first_name", "?") or "?"
-        kb.append([InlineKeyboardButton(
-            f"🧪 {name} | {t.get('platform', '?')} | {t['test_id'][-8:]}",
-            callback_data=f"testdet_{t['test_id']}"
-        )])
-    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="tests_menu_back")])
-    label = {"pending": "⏳ در انتظار", "approved": "✅ تأیید شده", "rejected": "❌ رد شده"}.get(status, "")
-
-    if is_callback:
-        await safe_edit(msg, f"🧪 **تست‌های {label}**\n({len(tests)} مورد)", reply_markup=InlineKeyboardMarkup(kb))
-    else:
-        await msg.reply_text(f"🧪 **تست‌های {label}**\n({len(tests)} مورد)", reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def view_test_detail(query: CallbackQuery, ctx, tid):
-    t = dm.get_test(tid)
-    if not t:
-        await query.answer("یافت نشد")
-        return
-
-    u = dm.data["users"].get(str(t['user_id']), {})
-    name = u.get("first_name", "?") or "?"
-    uname = u.get("username", "")
-    uname_str = f"@{uname}" if uname else "—"
-
-    status_text = {
-        "pending": "⏳ در انتظار",
-        "approved": "✅ تأیید شده",
-        "rejected": "❌ رد شده"
-    }.get(t.get("status"), "❓")
-
-    text = (
-        f"🧪 **تست کانفیگ**\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🆔 `{t['test_id']}`\n"
-        f"👤 {name} | {uname_str}\n"
-        f"📱 `{t['user_id']}`\n"
-        f"📲 پلتفرم: {t.get('platform', '?')}\n"
-        f"📅 {t.get('date', '')}\n"
-        f"📊 وضعیت: {status_text}\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"📄 محتوا:\n`{t.get('config_text', '')[:500]}`"
-    )
-
-    kb = []
-    if t.get("status") == "pending":
-        kb.append([
-            InlineKeyboardButton("✅ تأیید", callback_data=f"testap_{tid}"),
-            InlineKeyboardButton("❌ رد", callback_data=f"testrj_{tid}")
-        ])
-    kb.append([InlineKeyboardButton("✉️ پیام به کاربر", callback_data=f"testdm_{tid}")])
-    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="tests_pending")])
-
-    if t.get("file_id") and t.get("file_type") == "photo":
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        await ctx.bot.send_photo(
-            query.message.chat_id, t['file_id'],
-            caption=text,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-    elif t.get("file_id") and t.get("file_type") == "document":
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        await ctx.bot.send_document(
-            query.message.chat_id, t['file_id'],
-            caption=text,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-    else:
-        await safe_edit(query.message, text, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def approve_test(query: CallbackQuery, ctx, tid):
-    t = dm.get_test(tid)
-    if not t or t['status'] != 'pending':
-        await query.answer("قابل تأیید نیست.")
-        return
-    dm.update_test(tid, {"status": "approved"})
-    await query.answer("✅ تأیید شد")
-    try:
-        await ctx.bot.send_message(
-            int(t['user_id']),
-            f"✅ **تست کانفیگ شما تأیید شد!**\n\n"
-            f"🆔 کد: `{tid}`\n"
-            f"📱 پلتفرم: {t.get('platform', '?')}\n\n"
-            f"🎉 کانفیگ شما در حال آماده‌سازی هست."
-        )
-    except Exception:
-        pass
-    await show_tests_by_status(query, ctx, 'pending')
-
-
-async def reject_test(query: CallbackQuery, ctx, tid):
-    t = dm.get_test(tid)
-    if not t or t['status'] != 'pending':
-        await query.answer("قابل رد نیست.")
-        return
-    dm.update_test(tid, {"status": "rejected"})
-    await query.answer("❌ رد شد")
-    try:
-        await ctx.bot.send_message(
-            int(t['user_id']),
-            f"❌ **تست کانفیگ شما رد شد**\n\n"
-            f"🆔 کد: `{tid}`\n\n"
-            f"برای پیگیری با پشتیبانی در تماس باش."
-        )
-    except Exception:
-        pass
-    await show_tests_by_status(query, ctx, 'pending')
-
-
-async def dm_test_user(query: CallbackQuery, ctx, tid):
-    t = dm.get_test(tid)
-    if not t:
-        await query.answer("یافت نشد")
-        return
-    clear_states(ctx)
-    ctx.user_data['awaiting_test_review'] = True
-    ctx.user_data['test_user_target'] = t['user_id']
-    ctx.user_data['test_review_id'] = tid
-    await query.message.reply_text(
-        f"✉️ **پیام به کاربر**\n🆔 `{t['user_id']}`\n\nمتن پیام رو بنویس:"
-    )
-
-
-async def handle_test_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_test_review'):
-        return False
-    target = context.user_data.get('test_user_target')
-    text = update.message.text
-    try:
-        await context.bot.send_message(int(target), f"📩 **از تیم پشتیبانی:**\n\n{text}")
-        await update.message.reply_text("✅ پیام ارسال شد.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ خطا: {e}")
-    clear_states(context)
-    return True
 
 
 async def show_daily_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2166,8 +1797,7 @@ async def show_daily_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_orders = 0
     total_revenue = 0
     for s in stats:
-        text += f"📅 {s['date']}\n"
-        text += f"   🛒 {s['orders']} | 💰 {fmt(s['revenue'])} ت\n\n"
+        text += f"📅 {s['date']}\n   🛒 {s['orders']} | 💰 {fmt(s['revenue'])} ت\n\n"
         total_orders += s['orders']
         total_revenue += s['revenue']
     text += f"━━━━━━━━━━━━━━━\n📊 مجموع: {total_orders} سفارش\n💰 درآمد: {fmt(total_revenue)} ت"
@@ -2224,12 +1854,8 @@ async def show_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uname_str = f"@{username}" if username else "بدون یوزرنیم"
         balance = u.get("balance", 0)
         orders_count = len(u.get("orders", []))
-        tests_count = u.get("tests_count", 0)
-        text += (
-            f"{i}. 🆔 `{uid}`\n"
-            f"   📛 {name} | {uname_str}\n"
-            f"   💰 {fmt(balance)} ت | 📦 {orders_count} | 🧪 {tests_count}\n\n"
-        )
+        test_badge = "🧪" if u.get("test_used") else ""
+        text += f"{i}. 🆔 `{uid}`\n   📛 {name} | {uname_str}\n   💰 {fmt(balance)} ت | 📦 {orders_count} {test_badge}\n\n"
     if len(users) > 30:
         text += f"... و {len(users) - 30} کاربر دیگه"
     await send_long_message(update, text)
@@ -2250,9 +1876,7 @@ async def handle_search_user(update: Update, context: ContextTypes.DEFAULT_TYPE)
     users = dm.data["users"]
     found = []
     for uid, u in users.items():
-        if (query in uid.lower() or
-            query in (u.get("username", "") or "").lower() or
-            query in (u.get("first_name", "") or "").lower()):
+        if (query in uid.lower() or query in (u.get("username", "") or "").lower() or query in (u.get("first_name", "") or "").lower()):
             found.append((uid, u))
     clear_states(context)
     if not found:
@@ -2265,21 +1889,16 @@ async def handle_search_user(update: Update, context: ContextTypes.DEFAULT_TYPE)
         uname_str = f"@{username}" if username else "ندارد"
         balance = u.get("balance", 0)
         orders_count = len(u.get("orders", []))
-        tests_count = u.get("tests_count", 0)
         banned = "🚫" if dm.is_banned(uid) else "✅"
         owner_badge = " 👑" if dm.is_owner(uid) else ""
         admin_badge = " 🛡" if (dm.is_admin(uid) and not dm.is_owner(uid)) else ""
-        text += (
-            f"{i}. 🆔 `{uid}`{owner_badge}{admin_badge}\n"
-            f"   📛 {name} | {uname_str}\n"
-            f"   💰 {fmt(balance)} ت | 📦 {orders_count} | 🧪 {tests_count}\n"
-            f"   {banned}\n\n"
-        )
+        test_badge = "🧪" if u.get("test_used") else ""
+        text += f"{i}. 🆔 `{uid}`{owner_badge}{admin_badge}\n   📛 {name} | {uname_str}\n   💰 {fmt(balance)} ت | 📦 {orders_count} {test_badge}\n   {banned}\n\n"
     await send_long_message(update, text)
 
 
 # =========================================================
-#                     مدیریت کارت‌ها
+#                     کارت‌ها
 # =========================================================
 
 def get_cards():
@@ -2355,10 +1974,7 @@ async def handle_add_card_holder(update: Update, context: ContextTypes.DEFAULT_T
     dm.data["cards"] = cards
     dm.save_data()
     clear_states(context)
-    await update.message.reply_text(
-        f"✅ کارت اضافه شد\n\n💳 {number}\n👤 {holder}\n"
-        f"{'✅ این کارت فعال شد' if is_first else ''}"
-    )
+    await update.message.reply_text(f"✅ کارت اضافه شد\n\n💳 {number}\n👤 {holder}\n{'✅ این کارت فعال شد' if is_first else ''}")
 
 
 async def del_card_menu(upd, ctx):
@@ -2373,10 +1989,7 @@ async def del_card_menu(upd, ctx):
         return
     kb = []
     for i, c in enumerate(cards):
-        kb.append([InlineKeyboardButton(
-            f"🗑️ حذف {c['number'][-4:]} ({c.get('holder', '-')})",
-            callback_data=f"card_del_{i}"
-        )])
+        kb.append([InlineKeyboardButton(f"🗑️ حذف {c['number'][-4:]} ({c.get('holder', '-')})", callback_data=f"card_del_{i}")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="card_menu")])
     await msg.reply_text("کدوم کارت رو حذف کنم؟", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -2413,10 +2026,7 @@ async def activate_card_menu(upd, ctx):
     kb = []
     for i, c in enumerate(cards):
         status = "✅" if c.get("active") else "⚪"
-        kb.append([InlineKeyboardButton(
-            f"{status} {c['number'][-4:]} ({c.get('holder', '-')})",
-            callback_data=f"card_act_{i}"
-        )])
+        kb.append([InlineKeyboardButton(f"{status} {c['number'][-4:]} ({c.get('holder', '-')})", callback_data=f"card_act_{i}")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="card_menu")])
     await msg.reply_text("کدوم کارت رو فعال کنم؟", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -2440,24 +2050,24 @@ async def activate_card_execute(upd, ctx, idx):
 
 
 # =========================================================
-#                     مدیریت برنامه‌ها
+#                     برنامه‌ها
 # =========================================================
 
 async def apps_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dm.is_owner(update.effective_user.id):
         return
     apps = dm.data.get("apps", [])
-    apps_text = dm.data.get("apps_text", "📱 برای اتصال، از برنامه‌های زیر استفاده کن:")
-    text = f"📱 **مدیریت برنامه‌های اتصال**\n\n📝 متن توضیحی:\n{apps_text}\n\n"
+    apps_text = dm.data.get("apps_text", "")
+    text = f"📱 **مدیریت برنامه‌های اتصال**\n\n📝 متن: {apps_text}\n\n"
     if not apps:
-        text += "❌ هیچ برنامه‌ای ثبت نشده."
+        text += "❌ هیچ برنامه‌ای نیست."
     else:
         for i, a in enumerate(apps, 1):
             text += f"{i}. {a.get('name', 'بدون نام')}\n"
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ افزودن برنامه", callback_data="app_add")],
-        [InlineKeyboardButton("🗑️ حذف برنامه", callback_data="app_del_menu")],
-        [InlineKeyboardButton("📝 تغییر متن توضیحی", callback_data="app_text")],
+        [InlineKeyboardButton("➕ افزودن", callback_data="app_add")],
+        [InlineKeyboardButton("🗑️ حذف", callback_data="app_del_menu")],
+        [InlineKeyboardButton("📝 تغییر متن", callback_data="app_text")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
     ])
     await update.message.reply_text(text, reply_markup=kb)
@@ -2471,7 +2081,7 @@ async def add_app_prompt(upd, ctx):
         msg = upd.message
     clear_states(ctx)
     ctx.user_data['awaiting_app_name'] = True
-    await msg.reply_text("📱 **افزودن برنامه جدید**\n\nاسم برنامه رو بنویس:")
+    await msg.reply_text("📱 اسم برنامه رو بنویس:")
 
 
 async def handle_add_app_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2480,7 +2090,7 @@ async def handle_add_app_name(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data['new_app_name'] = update.message.text.strip()
     context.user_data['awaiting_app_name'] = False
     context.user_data['awaiting_app_file'] = True
-    await update.message.reply_text("📤 حالا فایل APK برنامه رو بفرست:\n(به صورت Document)")
+    await update.message.reply_text("📤 فایل APK رو بفرست (Document):")
 
 
 async def handle_add_app_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2493,7 +2103,7 @@ async def handle_add_app_file(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif update.message.video:
         file_id = update.message.video.file_id
     else:
-        await update.message.reply_text("❌ لطفاً فایل APK رو به صورت Document بفرست.")
+        await update.message.reply_text("❌ فایل APK رو به صورت Document بفرست.")
         return
     apps = dm.data.get("apps", [])
     apps.append({"name": name, "file_id": file_id})
@@ -2511,16 +2121,13 @@ async def del_app_menu(upd, ctx):
         msg = upd.message
     apps = dm.data.get("apps", [])
     if not apps:
-        await msg.reply_text("❌ هیچ برنامه‌ای نیست.")
+        await msg.reply_text("❌ برنامه‌ای نیست.")
         return
     kb = []
     for i, a in enumerate(apps):
-        kb.append([InlineKeyboardButton(
-            f"🗑️ حذف {a.get('name', 'بدون نام')}",
-            callback_data=f"app_del_{i}"
-        )])
+        kb.append([InlineKeyboardButton(f"🗑️ {a.get('name', 'بدون نام')}", callback_data=f"app_del_{i}")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="app_menu")])
-    await msg.reply_text("کدوم برنامه رو حذف کنم؟", reply_markup=InlineKeyboardMarkup(kb))
+    await msg.reply_text("کدوم رو حذف کنم؟", reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def del_app_execute(upd, ctx, idx):
@@ -2534,9 +2141,7 @@ async def del_app_execute(upd, ctx, idx):
         removed = apps.pop(idx)
         dm.data["apps"] = apps
         dm.save_data()
-        await msg.reply_text(f"✅ برنامه {removed.get('name', '')} حذف شد.")
-    else:
-        await msg.reply_text("❌ برنامه پیدا نشد.")
+        await msg.reply_text(f"✅ {removed.get('name', '')} حذف شد.")
     await apps_menu(msg, ctx)
 
 
@@ -2549,7 +2154,7 @@ async def app_text_prompt(upd, ctx):
     clear_states(ctx)
     ctx.user_data['awaiting_apps_text'] = True
     current = dm.data.get("apps_text", "")
-    await msg.reply_text(f"📝 متن فعلی:\n{current}\n\nمتن جدید رو بنویس:")
+    await msg.reply_text(f"📝 متن فعلی:\n{current}\n\nمتن جدید:")
 
 
 async def handle_apps_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2558,17 +2163,17 @@ async def handle_apps_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dm.data["apps_text"] = update.message.text.strip()
     dm.save_data()
     clear_states(context)
-    await update.message.reply_text("✅ متن توضیحی تغییر کرد.")
+    await update.message.reply_text("✅ متن تغییر کرد.")
 
 
 # =========================================================
-#                     افزودن محصول
+#                     محصولات (ادمین)
 # =========================================================
 
 async def add_product_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_product_name'] = True
-    await update.message.reply_text("➕ **افزودن محصول**\nنام محصول رو بنویس:\n(برای انصراف /cancel)")
+    await update.message.reply_text("➕ **افزودن محصول**\nنام محصول:\n(برای انصراف /cancel)")
 
 
 async def handle_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2576,7 +2181,7 @@ async def handle_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['new_product_name'] = update.message.text
         context.user_data['awaiting_product_name'] = False
         context.user_data['awaiting_product_price'] = True
-        await update.message.reply_text("💰 قیمت رو به تومان بنویس:")
+        await update.message.reply_text("💰 قیمت به تومان:")
     elif context.user_data.get('awaiting_product_price'):
         try:
             price = int(update.message.text)
@@ -2586,7 +2191,7 @@ async def handle_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['new_product_price'] = price
         context.user_data['awaiting_product_price'] = False
         context.user_data['awaiting_product_stock'] = True
-        await update.message.reply_text("📦 موجودی اولیه رو بنویس:")
+        await update.message.reply_text("📦 موجودی اولیه:")
     elif context.user_data.get('awaiting_product_stock'):
         try:
             stock = int(update.message.text)
@@ -2596,30 +2201,17 @@ async def handle_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['new_product_stock'] = stock
         context.user_data['awaiting_product_stock'] = False
         context.user_data['awaiting_product_configs'] = True
-        await update.message.reply_text(
-            "🔑 **کانفیگ‌ها رو بفرست**\n\nهر کانفیگ تو یه خط جداگانه.\nاگه نداری، بنویس: `ندارم`"
-        )
+        await update.message.reply_text("🔑 کانفیگ‌ها (هر خط یکی) یا `ندارم`:")
     elif context.user_data.get('awaiting_product_configs'):
         configs_text = update.message.text.strip()
-        configs = []
-        if configs_text != "ندارم":
-            configs = [c.strip() for c in configs_text.split("\n") if c.strip()]
+        configs = [] if configs_text == "ندارم" else [c.strip() for c in configs_text.split("\n") if c.strip()]
         name = context.user_data.get('new_product_name')
         price = context.user_data.get('new_product_price')
         stock = context.user_data.get('new_product_stock')
         pid = dm.add_product({"name": name, "price": price, "stock": stock, "configs": configs})
         clear_states(context)
-        await update.message.reply_text(
-            f"✅ **محصول اضافه شد**\n\n"
-            f"📛 {name}\n🆔 ID: {pid}\n"
-            f"💰 {fmt(price)} ت\n📦 موجودی: {stock}\n"
-            f"🔑 کانفیگ: {len(configs)}"
-        )
+        await update.message.reply_text(f"✅ محصول اضافه شد\n📛 {name}\n🆔 {pid}\n💰 {fmt(price)} ت\n📦 {stock}\n🔑 {len(configs)}")
 
-
-# =========================================================
-#                     مدیریت محصولات
-# =========================================================
 
 async def manage_products(upd, ctx):
     if isinstance(upd, CallbackQuery):
@@ -2641,17 +2233,13 @@ async def manage_products(upd, ctx):
 
     kb = []
     for p in products:
-        configs_count = len(p.get("configs", []))
+        cc = len(p.get("configs", []))
         kb.append([
-            InlineKeyboardButton(
-                f"✏️ {p['name']} ({p['stock']} | {configs_count}cfg)",
-                callback_data=f"editp_{p['id']}"
-            ),
+            InlineKeyboardButton(f"✏️ {p['name']} ({p['stock']} | {cc}cfg)", callback_data=f"editp_{p['id']}"),
             InlineKeyboardButton("❌", callback_data=f"delp_{p['id']}")
         ])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")])
     markup = InlineKeyboardMarkup(kb)
-
     if is_callback:
         await safe_edit(msg, "📦 **مدیریت محصولات**", reply_markup=markup)
     else:
@@ -2663,11 +2251,8 @@ async def delete_product_confirm(query: CallbackQuery, ctx, pid):
     if not p:
         await query.answer("یافت نشد")
         return
-    kb = [
-        [InlineKeyboardButton("✅ بله", callback_data=f"confirmdel_{pid}")],
-        [InlineKeyboardButton("❌ انصراف", callback_data="manage_products")]
-    ]
-    await query.edit_message_text(f"⚠️ حذف {p['name']} مطمئنی؟", reply_markup=InlineKeyboardMarkup(kb))
+    kb = [[InlineKeyboardButton("✅ بله", callback_data=f"confirmdel_{pid}")], [InlineKeyboardButton("❌ انصراف", callback_data="manage_products")]]
+    await query.edit_message_text(f"⚠️ حذف {p['name']}؟", reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def confirm_delete_product(query: CallbackQuery, ctx, pid):
@@ -2681,29 +2266,23 @@ async def edit_product_prompt(query: CallbackQuery, ctx, pid):
     if not p:
         await query.answer("یافت نشد")
         return
-    configs_count = len(p.get("configs", []))
+    cc = len(p.get("configs", []))
     kb = [
-        [InlineKeyboardButton("✏️ ویرایش اطلاعات", callback_data=f"editinfo_{pid}")],
-        [InlineKeyboardButton(f"🔑 افزودن کانفیگ ({configs_count})", callback_data=f"addcfg_{pid}")],
+        [InlineKeyboardButton("✏️ ویرایش", callback_data=f"editinfo_{pid}")],
+        [InlineKeyboardButton(f"🔑 افزودن کانفیگ ({cc})", callback_data=f"addcfg_{pid}")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="manage_products")]
     ]
-    await query.edit_message_text(
-        f"✏️ {p['name']}\n\n💰 {fmt(p['price'])} ت\n📦 موجودی: {p['stock']}\n🔑 کانفیگ: {configs_count}",
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
+    await query.edit_message_text(f"✏️ {p['name']}\n💰 {fmt(p['price'])} ت\n📦 {p['stock']}\n🔑 {cc}", reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def edit_product_info_prompt(query: CallbackQuery, ctx, pid):
     p = dm.get_product(pid)
     if not p:
-        await query.answer("یافت نشد")
         return
     clear_states(ctx)
     ctx.user_data['editing_product_id'] = pid
     ctx.user_data['awaiting_edit_product'] = True
-    await query.edit_message_text(
-        f"✏️ ویرایش {p['name']}\n\n۴ خط بفرست:\nنام\nقیمت\nموجودی\nتوضیحات"
-    )
+    await query.edit_message_text(f"✏️ ویرایش {p['name']}\n\n۴ خط بفرست:\nنام\nقیمت\nموجودی\nتوضیحات")
 
 
 async def handle_edit_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2719,23 +2298,22 @@ async def handle_edit_product(update: Update, context: ContextTypes.DEFAULT_TYPE
         price = int(lines[1].strip())
         stock = int(lines[2].strip())
     except ValueError:
-        await update.message.reply_text("❌ قیمت و موجودی باید عدد باشن.")
+        await update.message.reply_text("❌ عدد.")
         return
     desc = "\n".join(lines[3:]).strip()
     dm.update_product(pid, {"name": name, "price": price, "stock": stock, "description": desc})
     clear_states(context)
-    await update.message.reply_text("✅ محصول ویرایش شد.")
+    await update.message.reply_text("✅ ویرایش شد.")
 
 
 async def add_config_prompt(query: CallbackQuery, ctx, pid):
     p = dm.get_product(pid)
     if not p:
-        await query.answer("یافت نشد")
         return
     clear_states(ctx)
     ctx.user_data['adding_config_pid'] = pid
     ctx.user_data['awaiting_config_add'] = True
-    await query.edit_message_text(f"🔑 افزودن کانفیگ به {p['name']}\n\nهر کانفیگ خط به خط:")
+    await query.edit_message_text(f"🔑 افزودن کانفیگ به {p['name']}:\n(هر خط یکی)")
 
 
 async def handle_add_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2744,7 +2322,6 @@ async def handle_add_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pid = context.user_data.get('adding_config_pid')
     p = dm.get_product(pid)
     if not p:
-        await update.message.reply_text("❌ محصول یافت نشد.")
         clear_states(context)
         return
     new_configs = [c.strip() for c in update.message.text.strip().split("\n") if c.strip()]
@@ -2758,13 +2335,13 @@ async def handle_add_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def increase_stock_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_stock_increase'] = True
-    await update.message.reply_text("📈 **افزایش موجودی**\n`product_id amount`\nمثال: `1 50`")
+    await update.message.reply_text("📈 `product_id amount`\nمثال: `1 50`")
 
 
 async def decrease_stock_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_stock_decrease'] = True
-    await update.message.reply_text("📉 **کسر موجودی**\n`product_id amount`\nمثال: `1 10`")
+    await update.message.reply_text("📉 `product_id amount`\nمثال: `1 10`")
 
 
 async def handle_stock_change(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2773,11 +2350,10 @@ async def handle_stock_change(update: Update, context: ContextTypes.DEFAULT_TYPE
         if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
             await update.message.reply_text("❌ مثال: `1 50`")
             return
-        pid = int(parts[0])
-        amount = int(parts[1])
+        pid, amount = int(parts[0]), int(parts[1])
         p = dm.get_product(pid)
         if not p:
-            await update.message.reply_text("❌ محصول یافت نشد.")
+            await update.message.reply_text("❌ یافت نشد.")
             clear_states(context)
             return
         if context.user_data.get('awaiting_stock_increase'):
@@ -2810,7 +2386,7 @@ async def handle_all_balance(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if amount <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ عدد مثبت بفرست.")
+        await update.message.reply_text("❌ عدد مثبت.")
         return
     if context.user_data.get('awaiting_increase_all'):
         n = dm.increase_all(amount)
@@ -2823,22 +2399,22 @@ async def handle_all_balance(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # =========================================================
-#                     کد تخفیف ادمین
+#                     کد تخفیف / رفرال / سفارش / شارژ
 # =========================================================
 
 async def coupon_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dm.is_owner(update.effective_user.id):
         return
     coupons = dm.get_coupons()
-    text = "🎟️ **مدیریت کدهای تخفیف**\n\n"
+    text = "🎟️ **کدهای تخفیف**\n\n"
     if coupons:
         for code, c in coupons.items():
-            text += f"`{code}` → {c['percent']}% | استفاده: {c['used']}/{c['max_uses'] or '∞'}\n"
+            text += f"`{code}` → {c['percent']}% | {c['used']}/{c['max_uses'] or '∞'}\n"
     else:
         text += "هیچ کدی نیست."
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ افزودن کد", callback_data="add_coupon")],
-        [InlineKeyboardButton("🗑️ حذف کد", callback_data="del_coupon")],
+        [InlineKeyboardButton("➕ افزودن", callback_data="add_coupon")],
+        [InlineKeyboardButton("🗑️ حذف", callback_data="del_coupon")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
     ])
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
@@ -2852,17 +2428,17 @@ async def add_coupon_prompt(upd, ctx):
         msg = upd.message
     clear_states(ctx)
     ctx.user_data['awaiting_coupon_percent'] = True
-    await msg.reply_text("🎟️ درصد تخفیف (1-99):")
+    await msg.reply_text("🎟️ درصد (1-99):")
 
 
 async def handle_add_coupon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_coupon_percent'):
         try:
             percent = int(update.message.text)
-            if percent < 1 or percent > 99:
+            if not 1 <= percent <= 99:
                 raise ValueError
         except ValueError:
-            await update.message.reply_text("❌ 1 تا 99.")
+            await update.message.reply_text("❌ 1-99.")
             return
         context.user_data['coupon_percent'] = percent
         context.user_data['awaiting_coupon_percent'] = False
@@ -2872,19 +2448,19 @@ async def handle_add_coupon(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             max_uses = int(update.message.text)
         except ValueError:
-            await update.message.reply_text("❌ عدد بفرست.")
+            await update.message.reply_text("❌ عدد.")
             return
         context.user_data['coupon_max'] = max_uses
         context.user_data['awaiting_coupon_max'] = False
         context.user_data['awaiting_coupon_code'] = True
-        await update.message.reply_text("🔤 کد تخفیف رو بنویس:")
+        await update.message.reply_text("🔤 کد:")
     elif context.user_data.get('awaiting_coupon_code'):
         code = update.message.text.strip().upper()
         percent = context.user_data.get('coupon_percent')
         max_uses = context.user_data.get('coupon_max')
         dm.add_coupon(code, percent, max_uses)
         clear_states(context)
-        await update.message.reply_text(f"✅ کد `{code}` با {percent}% ساخته شد.")
+        await update.message.reply_text(f"✅ کد `{code}` ساخته شد.")
 
 
 async def del_coupon_prompt(upd, ctx):
@@ -2895,7 +2471,7 @@ async def del_coupon_prompt(upd, ctx):
         msg = upd.message
     clear_states(ctx)
     ctx.user_data['awaiting_coupon_delete'] = True
-    await msg.reply_text("🗑️ کد تخفیف مورد نظر:")
+    await msg.reply_text("🗑️ کد مورد نظر:")
 
 
 async def handle_del_coupon(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2903,25 +2479,17 @@ async def handle_del_coupon(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     code = update.message.text.strip().upper()
     if dm.delete_coupon(code):
-        await update.message.reply_text(f"✅ کد `{code}` حذف شد.")
+        await update.message.reply_text(f"✅ حذف شد.")
     else:
-        await update.message.reply_text("❌ کد پیدا نشد.")
+        await update.message.reply_text("❌ پیدا نشد.")
     clear_states(context)
 
-
-# =========================================================
-#                     تنظیمات رفرال
-# =========================================================
 
 async def ref_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dm.is_owner(update.effective_user.id):
         return
     s = dm.get_ref_settings()
-    text = (
-        f"🎁 **تنظیمات رفرال**\n\n"
-        f"💰 پاداش هر دعوت: {fmt(s.get('bonus', 5000))} ت\n"
-        f"🔘 وضعیت: {'✅ فعال' if s.get('enabled', True) else '❌ غیرفعال'}"
-    )
+    text = f"🎁 **رفرال**\n💰 پاداش: {fmt(s.get('bonus', 5000))} ت\n🔘 {'✅ فعال' if s.get('enabled') else '❌ غیرفعال'}"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💰 تغییر پاداش", callback_data="set_ref_bonus")],
         [InlineKeyboardButton("🔘 روشن/خاموش", callback_data="toggle_ref")],
@@ -2938,7 +2506,7 @@ async def set_ref_bonus_prompt(upd, ctx):
         msg = upd.message
     clear_states(ctx)
     ctx.user_data['awaiting_ref_bonus'] = True
-    await msg.reply_text("💰 پاداش هر دعوت به تومان:")
+    await msg.reply_text("💰 پاداش:")
 
 
 async def handle_set_ref_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2949,7 +2517,7 @@ async def handle_set_ref_bonus(update: Update, context: ContextTypes.DEFAULT_TYP
         if bonus < 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ عدد مثبت بفرست.")
+        await update.message.reply_text("❌ عدد مثبت.")
         return
     s = dm.get_ref_settings()
     dm.set_ref_settings(bonus, s.get('min_purchase', 0), s.get('enabled', True))
@@ -2966,12 +2534,8 @@ async def toggle_ref(upd, ctx):
     s = dm.get_ref_settings()
     dm.set_ref_settings(s.get('bonus', 5000), s.get('min_purchase', 0), not s.get('enabled', True))
     new_s = dm.get_ref_settings()
-    await msg.reply_text(f"✅ رفرال {'فعال' if new_s['enabled'] else 'غیرفعال'} شد.")
+    await msg.reply_text(f"✅ {'فعال' if new_s['enabled'] else 'غیرفعال'} شد.")
 
-
-# =========================================================
-#                     سفارش‌ها
-# =========================================================
 
 async def show_orders_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
@@ -2980,7 +2544,7 @@ async def show_orders_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("❌ رد شده", callback_data="ord_rejected")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
     ])
-    await update.message.reply_text("📋 **مدیریت سفارش‌ها**", reply_markup=kb)
+    await update.message.reply_text("📋 **سفارش‌ها**", reply_markup=kb)
 
 
 async def show_orders_by_status(upd, ctx, statuses):
@@ -2991,10 +2555,8 @@ async def show_orders_by_status(upd, ctx, statuses):
     else:
         msg = upd.message
         is_callback = False
-
     orders = [o for o in dm.data["orders"] if o.get("status") in statuses]
     orders = sorted(orders, key=lambda x: x.get("date", ""), reverse=True)
-
     if not orders:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
         if is_callback:
@@ -3002,13 +2564,9 @@ async def show_orders_by_status(upd, ctx, statuses):
         else:
             await msg.reply_text("📭 سفارشی نیست.", reply_markup=kb)
         return
-
     kb = []
     for o in orders[:20]:
-        kb.append([InlineKeyboardButton(
-            f"#{o['order_id'][-10:]} | {fmt(o['total'])} ت",
-            callback_data=f"orddet_{o['order_id']}"
-        )])
+        kb.append([InlineKeyboardButton(f"#{o['order_id'][-10:]} | {fmt(o['total'])} ت", callback_data=f"orddet_{o['order_id']}")])
     kb.append([InlineKeyboardButton("🗑️ خالی کردن", callback_data=f"clrord_{'_'.join(statuses)}")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")])
     title = "📥 در انتظار" if "waiting_admin" in statuses else ("✅ تکمیل" if "completed" in statuses else "❌ رد")
@@ -3023,7 +2581,7 @@ async def clear_orders(query: CallbackQuery, ctx, statuses_str):
     statuses = statuses_str.split('_')
     orders_to_remove = [o for o in dm.data["orders"] if o.get("status") in statuses]
     if not orders_to_remove:
-        await query.edit_message_text("📭 سفارشی نیست.")
+        await query.edit_message_text("📭 چیزی نیست.")
         return
     for o in orders_to_remove:
         u = dm.get_user(o.get("user_id", ""))
@@ -3031,7 +2589,7 @@ async def clear_orders(query: CallbackQuery, ctx, statuses_str):
             u["orders"].remove(o["order_id"])
     dm.data["orders"] = [o for o in dm.data["orders"] if o.get("status") not in statuses]
     dm.save_data()
-    await query.edit_message_text(f"✅ {len(orders_to_remove)} سفارش حذف شد.")
+    await query.edit_message_text(f"✅ {len(orders_to_remove)} حذف شد.")
 
 
 async def view_order_detail(query: CallbackQuery, ctx, oid):
@@ -3041,26 +2599,15 @@ async def view_order_detail(query: CallbackQuery, ctx, oid):
         return
     ud = user_display(o.get("user_id", ""), o.get("username", ""))
     items = "\n".join(f"{i+1}. {it['name']} - {fmt(it['price'])} ت" for i, it in enumerate(o.get("items", [])))
-    text = (
-        f"🆔 `{o['order_id']}`\n"
-        f"👤 {ud}\n"
-        f"💰 {fmt(o['total'])} ت\n"
-    )
+    text = f"🆔 `{o['order_id']}`\n👤 {ud}\n💰 {fmt(o['total'])} ت\n"
     if o.get('discount'):
-        text += f"🎟️ تخفیف: {o['discount']}%\n"
-    text += (
-        f"📅 {o.get('date', '')}\n"
-        f"📌 {o['status']}\n"
-        f"━━━━━━━━━━\n{items}"
-    )
+        text += f"🎟️ {o['discount']}%\n"
+    text += f"📅 {o.get('date', '')}\n📌 {o['status']}\n━━━━━━━━━━\n{items}"
     kb = []
     if o['status'] == 'waiting_admin':
-        kb.append([
-            InlineKeyboardButton("✅ تأیید", callback_data=f"appr_{oid}"),
-            InlineKeyboardButton("❌ رد", callback_data=f"rej_{oid}")
-        ])
+        kb.append([InlineKeyboardButton("✅ تأیید", callback_data=f"appr_{oid}"), InlineKeyboardButton("❌ رد", callback_data=f"rej_{oid}")])
     if o.get('account_info'):
-        kb.append([InlineKeyboardButton("📤 مشاهده کانفیگ", callback_data=f"vcfg_{oid}")])
+        kb.append([InlineKeyboardButton("📤 کانفیگ", callback_data=f"vcfg_{oid}")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")])
     await safe_edit(query.message, text, reply_markup=InlineKeyboardMarkup(kb))
 
@@ -3070,32 +2617,29 @@ async def approve_order_prompt(query: CallbackQuery, ctx, oid):
     if not o or o['status'] != 'waiting_admin':
         await query.answer("قابل تأیید نیست.")
         return
-
     auto_configs = []
     for item in o.get('items', []):
         p = dm.get_product(item['id'])
         if p and p.get('configs') and len(p['configs']) > 0:
             auto_configs.append(p['configs'][0])
-
     if auto_configs:
         await query.edit_message_text(
-            f"📤 **تأیید سفارش `{oid}`**\n\n🔑 {len(auto_configs)} کانفیگ آماده تو دیتابیسه.",
+            f"📤 تأیید `{oid}`\n🔑 {len(auto_configs)} کانفیگ آماده.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🤖 ارسال خودکار", callback_data=f"autocfg_{oid}")],
-                [InlineKeyboardButton("✏️ ارسال دستی", callback_data=f"manualcfg_{oid}")],
+                [InlineKeyboardButton("🤖 خودکار", callback_data=f"autocfg_{oid}")],
+                [InlineKeyboardButton("✏️ دستی", callback_data=f"manualcfg_{oid}")],
                 [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
             ])
         )
     else:
         clear_states(ctx)
         ctx.user_data['sending_config_for'] = oid
-        await query.edit_message_text(f"📤 کانفیگ سفارش `{oid}` رو بفرست:")
+        await query.edit_message_text(f"📤 کانفیگ `{oid}` رو بفرست:")
 
 
 async def send_config_auto(query: CallbackQuery, ctx, oid):
     o = dm.get_order(oid)
     if not o:
-        await query.answer("یافت نشد")
         return
     sent_configs = []
     for item in o.get('items', []):
@@ -3131,7 +2675,6 @@ async def send_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return False
     o = dm.get_order(oid)
     if not o:
-        await update.message.reply_text("❌ سفارش یافت نشد.")
         context.user_data.pop('sending_config_for', None)
         return True
     target = int(o['user_id'])
@@ -3147,9 +2690,8 @@ async def send_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dm.adjust_stock(it['id'], -1)
         dm.update_order(oid, {"status": "completed", "account_info": cfg})
         context.user_data.pop('sending_config_for', None)
-        await update.message.reply_text(f"✅ کانفیگ ارسال شد.")
+        await update.message.reply_text(f"✅ ارسال شد.")
     except Exception as e:
-        logger.error(f"Config send err: {e}")
         await update.message.reply_text(f"❌ خطا: {e}")
     return True
 
@@ -3157,13 +2699,9 @@ async def send_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def view_config(query: CallbackQuery, ctx, oid):
     o = dm.get_order(oid)
     if not o or not o.get('account_info'):
-        await query.answer("کانفیگ نیست.")
+        await query.answer("نیست.")
         return
-    await safe_edit(
-        query.message,
-        f"**کانفیگ سفارش {oid}:**\n\n{o['account_info']}",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data=f"orddet_{oid}")]])
-    )
+    await safe_edit(query.message, f"**کانفیگ {oid}:**\n\n{o['account_info']}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data=f"orddet_{oid}")]]))
 
 
 async def reject_order(query: CallbackQuery, ctx, oid):
@@ -3184,10 +2722,6 @@ async def reject_order(query: CallbackQuery, ctx, oid):
     await show_orders_by_status(query, ctx, ['waiting_admin'])
 
 
-# =========================================================
-#                     درخواست‌های شارژ
-# =========================================================
-
 async def show_topup_requests(upd, ctx):
     if isinstance(upd, CallbackQuery):
         msg = upd.message
@@ -3196,7 +2730,6 @@ async def show_topup_requests(upd, ctx):
     else:
         msg = upd.message
         is_callback = False
-
     pending = [r for r in dm.data["topup_requests"] if r.get("status") == "pending"]
     if not pending:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
@@ -3211,7 +2744,6 @@ async def show_topup_requests(upd, ctx):
     kb.append([InlineKeyboardButton("🗑️ خالی کردن", callback_data="clrtop")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")])
     markup = InlineKeyboardMarkup(kb)
-
     if is_callback:
         await safe_edit(msg, "💰 **درخواست‌های شارژ**", reply_markup=markup)
     else:
@@ -3225,7 +2757,7 @@ async def clear_topups(query: CallbackQuery, ctx):
         return
     dm.data["topup_requests"] = [r for r in dm.data["topup_requests"] if r.get("status") != "pending"]
     dm.save_data()
-    await query.edit_message_text(f"✅ {len(pending)} درخواست حذف شد.")
+    await query.edit_message_text(f"✅ {len(pending)} حذف شد.")
 
 
 async def view_topup_detail(query: CallbackQuery, ctx, rid):
@@ -3234,18 +2766,8 @@ async def view_topup_detail(query: CallbackQuery, ctx, rid):
         await query.answer("یافت نشد")
         return
     ud = user_display(r.get("user_id", ""), r.get("username", ""))
-    text = (
-        f"💰 **درخواست شارژ**\n"
-        f"🆔 `{r['request_id']}`\n"
-        f"👤 {ud}\n"
-        f"💰 {fmt(r['amount'])} ت\n"
-        f"📅 {r.get('date', '')}"
-    )
-    kb = [
-        [InlineKeyboardButton("✅ تأیید", callback_data=f"apprtop_{rid}"),
-         InlineKeyboardButton("❌ رد", callback_data=f"rejtop_{rid}")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_topup")]
-    ]
+    text = f"💰 **شارژ**\n🆔 `{r['request_id']}`\n👤 {ud}\n💰 {fmt(r['amount'])} ت\n📅 {r.get('date', '')}"
+    kb = [[InlineKeyboardButton("✅ تأیید", callback_data=f"apprtop_{rid}"), InlineKeyboardButton("❌ رد", callback_data=f"rejtop_{rid}")], [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_topup")]]
     if r.get('receipt_photo'):
         try:
             await query.message.delete()
@@ -3287,41 +2809,33 @@ async def reject_topup(query: CallbackQuery, ctx, rid):
     await show_topup_requests(query, ctx)
 
 
-# =========================================================
-#                     کاربر / بن / کیف پول / پیام مستقیم
-# =========================================================
-
 async def user_check_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_user_check'] = True
-    await update.message.reply_text("👤 شناسه کاربر:")
+    await update.message.reply_text("👤 شناسه:")
 
 
 async def handle_user_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.text.strip()
     if not uid.isdigit():
-        await update.message.reply_text("❌ عدد بفرست.")
+        await update.message.reply_text("❌ عدد.")
         return
     u = dm.get_user(uid)
     banned = dm.is_banned(uid)
-    ud = user_display(uid, u.get("username", ""))
     owner_badge = " 👑" if dm.is_owner(uid) else (" 🛡" if dm.is_admin(uid) else "")
+    test_badge = "🧪 استفاده شده" if u.get("test_used") else "❌ استفاده نشده"
     clear_states(context)
     await update.message.reply_text(
-        f"👤 {ud}{owner_badge}\n"
-        f"📛 {u.get('first_name', '-')}\n"
-        f"💰 {fmt(u.get('balance', 0))} ت\n"
-        f"📦 {len(u.get('orders', []))} سفارش\n"
-        f"🧪 {u.get('tests_count', 0)} تست\n"
-        f"🎁 {u.get('invited_count', 0)} دعوت\n"
-        f"🚫 {'مسدود' if banned else 'فعال'}"
+        f"👤 `{uid}`{owner_badge}\n📛 {u.get('first_name', '-')}\n"
+        f"💰 {fmt(u.get('balance', 0))} ت\n📦 {len(u.get('orders', []))}\n"
+        f"🧪 تست: {test_badge}\n🚫 {'مسدود' if banned else 'فعال'}"
     )
 
 
 async def ban_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_ban_toggle'] = True
-    await update.message.reply_text("🚫 شناسه کاربر:")
+    await update.message.reply_text("🚫 شناسه:")
 
 
 async def handle_ban_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3341,7 +2855,7 @@ async def handle_ban_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def wallet_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_states(context)
     context.user_data['awaiting_wallet_user'] = True
-    await update.message.reply_text("💰 شناسه کاربر:")
+    await update.message.reply_text("💰 شناسه:")
 
 
 async def handle_wallet_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3374,7 +2888,7 @@ async def dm_user_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     clear_states(context)
     context.user_data['awaiting_dm_user'] = True
-    await update.message.reply_text("✉️ **ارسال پیام مستقیم**\nشناسه عددی کاربر:")
+    await update.message.reply_text("✉️ شناسه کاربر:")
 
 
 async def handle_dm_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3383,14 +2897,10 @@ async def handle_dm_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ عدد.")
         return
     u = dm.get_user(uid)
-    if not u:
-        await update.message.reply_text("❌ کاربر پیدا نشد.")
-        return
     context.user_data['dm_target_user'] = uid
     context.user_data['awaiting_dm_user'] = False
     context.user_data['awaiting_dm_text'] = True
-    name = u.get("first_name", "?") or "?"
-    await update.message.reply_text(f"👤 {name}\n\nمتن پیام رو بنویس:")
+    await update.message.reply_text(f"👤 {u.get('first_name', '?')}\n\nمتن پیام:")
 
 
 async def handle_dm_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3399,23 +2909,19 @@ async def handle_dm_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = context.user_data.get('dm_target_user')
     text = update.message.text
     try:
-        await context.bot.send_message(int(target), f"📩 **پیام از مدیریت:**\n\n{text}")
-        await update.message.reply_text("✅ پیام ارسال شد.")
+        await context.bot.send_message(int(target), f"📩 **از مدیریت:**\n\n{text}")
+        await update.message.reply_text("✅ ارسال شد.")
     except Exception as e:
         await update.message.reply_text(f"❌ خطا: {e}")
     clear_states(context)
 
-
-# =========================================================
-#                     تنظیمات / مالکین / ادمین‌ها
-# =========================================================
 
 async def set_support_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dm.is_owner(update.effective_user.id):
         return
     clear_states(context)
     context.user_data['awaiting_support'] = True
-    await update.message.reply_text("🛠 آیدی پشتیبانی (مثال @username):")
+    await update.message.reply_text("🛠 آیدی پشتیبانی:")
 
 
 async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3423,8 +2929,12 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dm.data["support_username"] = update.message.text.strip()
         dm.save_data()
         clear_states(context)
-        await update.message.reply_text("✅ پشتیبانی ثبت شد.")
+        await update.message.reply_text("✅ ثبت شد.")
 
+
+# =========================================================
+#                     مالکین / ادمین‌ها
+# =========================================================
 
 async def owners_management_menu(upd, ctx):
     if isinstance(upd, CallbackQuery):
@@ -3438,24 +2948,21 @@ async def owners_management_menu(upd, ctx):
         is_callback = False
 
     if not dm.is_owner(user.id):
-        await msg.reply_text("❌ فقط مالکین دسترسی دارن.")
+        await msg.reply_text("❌ فقط مالکین.")
         return
 
     owners = dm.get_owners_list()
-    text = f"👑 **مدیریت مالکین**\n\n📊 تعداد: {len(owners)} نفر\n\n"
+    text = f"👑 **مدیریت مالکین**\n📊 تعداد: {len(owners)}\n\n"
     for i, oid in enumerate(owners, 1):
         u = dm.data["users"].get(str(oid), {})
         name = u.get("first_name", "ناشناس") or "ناشناس"
-        username = u.get("username", "")
-        uname_str = f"@{username}" if username else "—"
-        source_badge = " 🔒" if dm.is_source_owner(oid) else ""
-        text += f"{i}. `{oid}`{source_badge}\n   📛 {name} | {uname_str}\n\n"
-
-    text += "🔒 = مالک سورس (قابل حذف نیست)"
+        src = " 🔒" if dm.is_source_owner(oid) else ""
+        text += f"{i}. `{oid}`{src}\n   📛 {name}\n\n"
+    text += "🔒 = سورس"
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ افزودن مالک جدید", callback_data="owner_add")],
-        [InlineKeyboardButton("🗑️ حذف مالک", callback_data="owner_del_menu")],
+        [InlineKeyboardButton("➕ افزودن", callback_data="owner_add")],
+        [InlineKeyboardButton("🗑️ حذف", callback_data="owner_del_menu")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
     ])
     if is_callback:
@@ -3472,11 +2979,7 @@ async def owner_add_prompt(upd, ctx):
         msg = upd.message
     clear_states(ctx)
     ctx.user_data['awaiting_add_owner'] = True
-    await msg.reply_text(
-        "👑 **افزودن مالک جدید**\n\n"
-        "🔍 آیدی عددی کاربر رو بفرست:\n"
-        "برای انصراف /cancel"
-    )
+    await msg.reply_text("👑 آیدی عددی مالک جدید:")
 
 
 async def owner_remove_menu(upd, ctx):
@@ -3485,25 +2988,18 @@ async def owner_remove_menu(upd, ctx):
         await answer_cb(upd)
     else:
         msg = upd.message
-
     owners = dm.get_owners_list()
     removable = [o for o in owners if not dm.is_source_owner(o)]
-
     if not removable:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="owners_menu")]])
-        await safe_edit(msg, "❌ هیچ مالکی قابل حذف نیست.\n(همه مالکین سورس هستن)", reply_markup=kb)
+        await safe_edit(msg, "❌ هیچ مالکی قابل حذف نیست.", reply_markup=kb)
         return
-
     kb = []
     for oid in removable:
         u = dm.data["users"].get(str(oid), {})
-        name = u.get("first_name", "ناشناس") or "ناشناس"
-        kb.append([InlineKeyboardButton(
-            f"❌ حذف {name} | {oid}",
-            callback_data=f"owner_del_{oid}"
-        )])
+        kb.append([InlineKeyboardButton(f"❌ {u.get('first_name', 'ناشناس')} | {oid}", callback_data=f"owner_del_{oid}")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="owners_menu")])
-    await safe_edit(msg, "🗑️ **کدوم مالک رو حذف کنم؟**", reply_markup=InlineKeyboardMarkup(kb))
+    await safe_edit(msg, "کدوم؟", reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def owner_delete_confirm(upd, ctx, target_id):
@@ -3512,23 +3008,12 @@ async def owner_delete_confirm(upd, ctx, target_id):
         await answer_cb(upd)
     else:
         msg = upd.message
-
     if dm.is_source_owner(target_id):
-        await answer_cb(upd, "❌ این مالک سورس هست!", show_alert=True)
+        await answer_cb(upd, "❌ مالک سورس!", show_alert=True)
         return
-
     u = dm.data["users"].get(str(target_id), {})
-    name = u.get("first_name", "ناشناس") or "ناشناس"
-
-    kb = [
-        [InlineKeyboardButton("✅ بله، حذف کن", callback_data=f"owner_delok_{target_id}")],
-        [InlineKeyboardButton("❌ انصراف", callback_data="owner_del_menu")]
-    ]
-    await safe_edit(
-        msg,
-        f"⚠️ **تأیید حذف مالک**\n\n👤 {name}\n🆔 `{target_id}`\n\nمطمئنی؟",
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
+    kb = [[InlineKeyboardButton("✅ بله", callback_data=f"owner_delok_{target_id}")], [InlineKeyboardButton("❌ انصراف", callback_data="owner_del_menu")]]
+    await safe_edit(msg, f"⚠️ حذف {u.get('first_name', 'ناشناس')}؟", reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def owner_delete_execute(upd, ctx, target_id):
@@ -3539,52 +3024,40 @@ async def owner_delete_execute(upd, ctx, target_id):
     else:
         msg = upd.message
         actor = upd.effective_user
-
     if dm.is_source_owner(target_id):
-        await msg.reply_text("❌ این مالک سورس هست!")
+        await msg.reply_text("❌ مالک سورس!")
         return
-
     if str(target_id) == str(actor.id):
-        await msg.reply_text("❌ نمی‌تونی خودت رو حذف کنی!")
+        await msg.reply_text("❌ خودت رو نمی‌تونی!")
         return
-
     if dm.remove_owner(target_id):
         dm.add_admin_log(actor.id, target_id, "حذف مالک")
         try:
-            await ctx.bot.send_message(int(target_id), "❌ شما از لیست مالکین ربات حذف شدید.")
+            await ctx.bot.send_message(int(target_id), "❌ از مالکین حذف شدی.")
         except Exception:
             pass
-        await msg.reply_text(f"✅ مالک `{target_id}` حذف شد.")
+        await msg.reply_text(f"✅ حذف شد.")
     else:
-        await msg.reply_text("❌ حذف نشد.")
+        await msg.reply_text("❌ نشد.")
 
 
 async def handle_owner_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.text.strip()
-
-    if uid.startswith("@"):
-        await update.message.reply_text("❌ فقط آیدی عددی.")
-        return
     if not uid.isdigit():
-        await update.message.reply_text("❌ آیدی باید عدد باشه.")
+        await update.message.reply_text("❌ فقط عدد.")
         return
-
     if context.user_data.get('awaiting_add_owner'):
         actor = update.effective_user.id
         if dm.add_owner(uid):
             dm.add_admin_log(actor, uid, "افزودن مالک")
             clear_states(context)
-            await update.message.reply_text(f"✅ `{uid}` به لیست مالکین اضافه شد.")
+            await update.message.reply_text(f"✅ اضافه شد.")
             try:
-                await context.bot.send_message(
-                    int(uid),
-                    "👑 **شما به عنوان مالک ربات تعیین شدید!**\n\n"
-                    "برای دسترسی به پنل، دستور /start رو بزن."
-                )
+                await context.bot.send_message(int(uid), "👑 مالک شدی!")
             except Exception:
                 pass
         else:
-            await update.message.reply_text("❌ این کاربر از قبل مالکه.")
+            await update.message.reply_text("❌ از قبل مالکه.")
 
 
 async def admins_management_menu(upd, ctx):
@@ -3597,29 +3070,22 @@ async def admins_management_menu(upd, ctx):
         msg = upd.message
         user = upd.effective_user
         is_callback = False
-
     if not dm.is_owner(user.id):
-        await msg.reply_text("❌ فقط مالکین دسترسی دارن.")
+        await msg.reply_text("❌ فقط مالکین.")
         return
-
     admins = dm.get_admins_list()
-    text = f"🛡 **مدیریت ادمین‌ها**\n\n📊 تعداد: {len(admins)} نفر\n\n"
+    text = f"🛡 **مدیریت ادمین‌ها**\n📊 تعداد: {len(admins)}\n\n"
     if not admins:
-        text += "❌ هیچ ادمینی وجود نداره."
+        text += "❌ ادمینی نیست."
     else:
         for i, aid in enumerate(admins, 1):
             u = dm.data["users"].get(str(aid), {})
-            name = u.get("first_name", "ناشناس") or "ناشناس"
-            username = u.get("username", "")
-            uname_str = f"@{username}" if username else "—"
-            source_badge = " 🔒" if dm.is_source_admin(aid) else ""
-            text += f"{i}. `{aid}`{source_badge}\n   📛 {name} | {uname_str}\n\n"
-
-    text += "🔒 = ادمین سورس (قابل حذف نیست)"
-
+            src = " 🔒" if dm.is_source_admin(aid) else ""
+            text += f"{i}. `{aid}`{src}\n   📛 {u.get('first_name', 'ناشناس')}\n\n"
+    text += "🔒 = سورس"
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ افزودن ادمین جدید", callback_data="admin_add")],
-        [InlineKeyboardButton("🗑️ حذف ادمین", callback_data="admin_del_menu")],
+        [InlineKeyboardButton("➕ افزودن", callback_data="admin_add")],
+        [InlineKeyboardButton("🗑️ حذف", callback_data="admin_del_menu")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
     ])
     if is_callback:
@@ -3636,11 +3102,7 @@ async def admin_add_prompt(upd, ctx):
         msg = upd.message
     clear_states(ctx)
     ctx.user_data['awaiting_add_admin'] = True
-    await msg.reply_text(
-        "🛡 **افزودن ادمین جدید**\n\n"
-        "🔍 آیدی عددی کاربر رو بفرست:\n"
-        "برای انصراف /cancel"
-    )
+    await msg.reply_text("🛡 آیدی عددی ادمین جدید:")
 
 
 async def admin_remove_menu(upd, ctx):
@@ -3649,25 +3111,18 @@ async def admin_remove_menu(upd, ctx):
         await answer_cb(upd)
     else:
         msg = upd.message
-
     admins = dm.get_admins_list()
     removable = [a for a in admins if not dm.is_source_admin(a)]
-
     if not removable:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admins_menu")]])
-        await safe_edit(msg, "❌ هیچ ادمینی قابل حذف نیست.", reply_markup=kb)
+        await safe_edit(msg, "❌ ادمینی قابل حذف نیست.", reply_markup=kb)
         return
-
     kb = []
     for aid in removable:
         u = dm.data["users"].get(str(aid), {})
-        name = u.get("first_name", "ناشناس") or "ناشناس"
-        kb.append([InlineKeyboardButton(
-            f"❌ حذف {name} | {aid}",
-            callback_data=f"admin_del_{aid}"
-        )])
+        kb.append([InlineKeyboardButton(f"❌ {u.get('first_name', 'ناشناس')} | {aid}", callback_data=f"admin_del_{aid}")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admins_menu")])
-    await safe_edit(msg, "🗑️ **کدوم ادمین رو حذف کنم؟**", reply_markup=InlineKeyboardMarkup(kb))
+    await safe_edit(msg, "کدوم؟", reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def admin_delete_confirm(upd, ctx, target_id):
@@ -3676,23 +3131,12 @@ async def admin_delete_confirm(upd, ctx, target_id):
         await answer_cb(upd)
     else:
         msg = upd.message
-
     if dm.is_source_admin(target_id):
-        await answer_cb(upd, "❌ این ادمین سورس هست!", show_alert=True)
+        await answer_cb(upd, "❌ سورس!", show_alert=True)
         return
-
     u = dm.data["users"].get(str(target_id), {})
-    name = u.get("first_name", "ناشناس") or "ناشناس"
-
-    kb = [
-        [InlineKeyboardButton("✅ بله", callback_data=f"admin_delok_{target_id}")],
-        [InlineKeyboardButton("❌ انصراف", callback_data="admin_del_menu")]
-    ]
-    await safe_edit(
-        msg,
-        f"⚠️ **تأیید حذف ادمین**\n\n👤 {name}\n🆔 `{target_id}`",
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
+    kb = [[InlineKeyboardButton("✅ بله", callback_data=f"admin_delok_{target_id}")], [InlineKeyboardButton("❌ انصراف", callback_data="admin_del_menu")]]
+    await safe_edit(msg, f"⚠️ حذف {u.get('first_name', 'ناشناس')}؟", reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def admin_delete_execute(upd, ctx, target_id):
@@ -3703,48 +3147,37 @@ async def admin_delete_execute(upd, ctx, target_id):
     else:
         msg = upd.message
         actor = upd.effective_user
-
     if dm.is_source_admin(target_id):
-        await msg.reply_text("❌ این ادمین سورس هست!")
+        await msg.reply_text("❌ سورس!")
         return
-
     if dm.remove_admin(target_id):
         dm.add_admin_log(actor.id, target_id, "حذف ادمین")
         try:
-            await ctx.bot.send_message(int(target_id), "❌ شما از لیست ادمین‌های ربات حذف شدید.")
+            await ctx.bot.send_message(int(target_id), "❌ از ادمین‌ها حذف شدی.")
         except Exception:
             pass
-        await msg.reply_text(f"✅ ادمین `{target_id}` حذف شد.")
+        await msg.reply_text(f"✅ حذف شد.")
     else:
-        await msg.reply_text("❌ ادمین پیدا نشد.")
+        await msg.reply_text("❌ پیدا نشد.")
 
 
 async def handle_admin_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.text.strip()
-
-    if uid.startswith("@"):
-        await update.message.reply_text("❌ فقط آیدی عددی.")
-        return
     if not uid.isdigit():
-        await update.message.reply_text("❌ آیدی باید عدد باشه.")
+        await update.message.reply_text("❌ فقط عدد.")
         return
-
     if context.user_data.get('awaiting_add_admin'):
         actor = update.effective_user.id
         if dm.add_admin(uid):
             dm.add_admin_log(actor, uid, "افزودن ادمین")
             clear_states(context)
-            await update.message.reply_text(f"✅ `{uid}` به لیست ادمین‌ها اضافه شد.")
+            await update.message.reply_text(f"✅ اضافه شد.")
             try:
-                await context.bot.send_message(
-                    int(uid),
-                    "🛡 **شما به عنوان ادمین ربات تعیین شدید!**\n\n"
-                    "برای دسترسی به پنل، دستور /start رو بزن."
-                )
+                await context.bot.send_message(int(uid), "🛡 ادمین شدی!")
             except Exception:
                 pass
         else:
-            await update.message.reply_text("❌ این کاربر از قبل ادمین یا مالکه.")
+            await update.message.reply_text("❌ از قبل هست.")
 
 
 async def show_admin_logs(upd, ctx):
@@ -3755,28 +3188,19 @@ async def show_admin_logs(upd, ctx):
     else:
         msg = upd.message
         is_callback = False
-
     logs = dm.get_admin_logs(30)
     if not logs:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
         if is_callback:
-            await safe_edit(msg, "📭 هیچ لاگی نیست.", reply_markup=kb)
+            await safe_edit(msg, "📭 خالیه.", reply_markup=kb)
         else:
-            await msg.reply_text("📭 هیچ لاگی نیست.", reply_markup=kb)
+            await msg.reply_text("📭 خالیه.", reply_markup=kb)
         return
-
-    text = "📜 **آخرین تغییرات ادمین/مالک**\n\n"
+    text = "📜 **آخرین تغییرات**\n\n"
     for log in logs:
         actor_u = dm.data["users"].get(str(log["actor"]), {})
         target_u = dm.data["users"].get(str(log["target"]), {})
-        actor_name = actor_u.get("first_name", "?") or "?"
-        target_name = target_u.get("first_name", "?") or "?"
-        text += (
-            f"🔹 **{log['action']}**\n"
-            f"👤 {actor_name} → 🎯 {target_name}\n"
-            f"📅 {log['date']}\n\n"
-        )
-
+        text += f"🔹 **{log['action']}**\n👤 {actor_u.get('first_name', '?')} → 🎯 {target_u.get('first_name', '?')}\n📅 {log['date']}\n\n"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
     if is_callback:
         await safe_edit(msg, text, reply_markup=kb)
@@ -3815,7 +3239,7 @@ async def delete_last_broadcast(update: Update, context: ContextTypes.DEFAULT_TY
         return
     history = dm.get_broadcast_history()
     if not history:
-        await update.message.reply_text("📭 تاریخچه خالیه.")
+        await update.message.reply_text("📭 خالیه.")
         return
     last = history[-1]
     deleted = 0
@@ -3828,7 +3252,7 @@ async def delete_last_broadcast(update: Update, context: ContextTypes.DEFAULT_TY
     history.pop()
     dm.data["broadcast_history"] = history
     dm.save_data()
-    await update.message.reply_text(f"✅ از {deleted} کاربر حذف شد.")
+    await update.message.reply_text(f"✅ از {deleted} حذف شد.")
 
 
 # =========================================================
@@ -3845,12 +3269,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌")
             return
 
-        # چک عضویت (از دکمه خودش)
+        # چک عضویت
         if data == "check_membership":
             user_id = str(query.from_user.id)
             is_member, missing = await check_membership(context.bot, user_id)
             if is_member:
-                await query.answer("✅ عضویتت تأیید شد!", show_alert=True)
+                await query.answer("✅ تأیید شد!", show_alert=True)
                 try:
                     await query.message.delete()
                 except Exception:
@@ -3862,10 +3286,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     missing_text.append("📢 کانال")
                 if "group" in missing:
                     missing_text.append("👥 گروه")
-                await query.answer(
-                    f"❌ هنوز عضو نشدی: {' و '.join(missing_text)}",
-                    show_alert=True
-                )
+                await query.answer(f"❌ هنوز عضو نشدی: {' و '.join(missing_text)}", show_alert=True)
             return
 
         # منو
@@ -3892,37 +3313,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "apply_coupon":
             await apply_coupon_prompt(query, context)
 
-        # تست
+        # تست کاربر
         elif data == "test_menu":
-            await test_config_menu(query, context)
+            await test_free_menu(query, context)
         elif data == "test_android":
-            await test_platform_selected(query, context, "اندروید")
+            await test_give_config(query, context, "android")
         elif data == "test_ios":
-            await test_platform_selected(query, context, "iOS")
+            await test_give_config(query, context, "ios")
         elif data == "test_windows":
-            await test_platform_selected(query, context, "ویندوز")
-        elif data == "tests_menu_back":
-            await show_tests_menu(query, context)
-        elif data == "tests_pending":
-            await show_tests_by_status(query, context, 'pending')
-        elif data == "tests_approved":
-            await show_tests_by_status(query, context, 'approved')
-        elif data == "tests_rejected":
-            await show_tests_by_status(query, context, 'rejected')
-        elif data.startswith("testdet_"):
-            await view_test_detail(query, context, data[8:])
-        elif data.startswith("testap_"):
-            await approve_test(query, context, data[7:])
-        elif data.startswith("testrj_"):
-            await reject_test(query, context, data[7:])
-        elif data.startswith("testdm_"):
-            await dm_test_user(query, context, data[7:])
-        elif data.startswith("testok_"):
-            await approve_test(query, context, data[7:])
-        elif data.startswith("testno_"):
-            await reject_test(query, context, data[7:])
+            await test_give_config(query, context, "windows")
 
-        # 🔒 عضویت اجباری
+        # تست ادمین
+        elif data == "test_manage":
+            await test_manage_menu(query, context)
+        elif data.startswith("testm_"):
+            platform = data[6:]
+            await test_manage_platform(query, context, platform)
+        elif data.startswith("testadd_"):
+            platform = data[8:]
+            await test_add_prompt(query, context, platform)
+        elif data.startswith("testdelok_"):
+            parts = data.split("_")
+            platform = parts[1]
+            idx = int(parts[2])
+            await test_del_execute(query, context, platform, idx)
+        elif data.startswith("testdel_"):
+            platform = data[8:]
+            await test_del_menu(query, context, platform)
+        elif data.startswith("testclr_"):
+            platform = data[8:]
+            await test_clear_execute(query, context, platform)
+
+        # عضویت اجباری
         elif data == "fj_toggle":
             await fj_toggle(query, context)
         elif data == "fj_channel":
@@ -3937,8 +3359,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await add_coupon_prompt(query, context)
         elif data == "del_coupon":
             await del_coupon_prompt(query, context)
-
-        # رفرال
         elif data == "set_ref_bonus":
             await set_ref_bonus_prompt(query, context)
         elif data == "toggle_ref":
@@ -3988,7 +3408,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("confirmdel_"):
             await confirm_delete_product(query, context, int(data.split("_")[1]))
 
-        # سفارش‌ها
+        # سفارش
         elif data.startswith("orddet_"):
             await view_order_detail(query, context, data[7:])
         elif data.startswith("appr_"):
@@ -4108,9 +3528,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif text == "🛒 باز/بستن فروشگاه":
         await toggle_shop(update, context)
     elif text == "🧪 مدیریت تست‌ها":
-        await show_tests_menu(update, context)
-    elif text == "📊 آمار تست‌ها" and dm.is_owner(uid):
-        await show_test_stats(update, context)
+        await test_manage_menu(update, context)
     elif text == "🔒 عضویت اجباری" and dm.is_owner(uid):
         await force_join_menu(update, context)
     elif text == "🛠 پشتیبانی" and dm.is_owner(uid):
@@ -4152,25 +3570,23 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     MAIN_MENU_BUTTONS = [
         "🛍️ مشاهده محصولات", "🛒 سبد خرید من", "👤 حساب کاربری",
-        "💰 کیف پول", "📱 برنامه‌های اتصال", "🧪 تست کانفیگ",
+        "💰 کیف پول", "📱 برنامه‌های اتصال", "🧪 تست رایگان",
         "🎁 دعوت دوستان", "📜 سفارش‌های من", "🔍 پیگیری سفارش",
         "📞 پشتیبانی", "ℹ️ راهنما", "⚙️ پنل مدیریت", "🔙 بازگشت"
     ]
     if text in MAIN_MENU_BUTTONS:
         clear_states(context)
 
-    # 🔒 چک عضویت اجباری برای کاربران عادی
-    if not dm.is_admin(uid) and text not in ["/start"] and not text.startswith("/"):
+    # 🔒 عضویت اجباری - قبل از هر کاری
+    if not dm.is_admin(uid) and not text.startswith("/"):
         is_member, missing = await check_membership(context.bot, uid)
         if not is_member:
             await show_force_join_message(update, context)
             return
 
     # State ها
-    if context.user_data.get('awaiting_test_config'):
-        await handle_test_config(update, context); return
-    if context.user_data.get('awaiting_test_review'):
-        await handle_test_review(update, context); return
+    if context.user_data.get('awaiting_test_config_add'):
+        await handle_test_config_add(update, context); return
     if context.user_data.get('awaiting_channel_id'):
         await handle_channel_id(update, context); return
     if context.user_data.get('awaiting_channel_link'):
@@ -4260,8 +3676,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await wallet_menu(update, context)
     elif text == "📱 برنامه‌های اتصال":
         await show_apps(update, context)
-    elif text == "🧪 تست کانفیگ":
-        await test_config_menu(update, context)
+    elif text == "🧪 تست رایگان":
+        await test_free_menu(update, context)
     elif text == "🎁 دعوت دوستان":
         await show_referral(update, context)
     elif text == "📜 سفارش‌های من":
@@ -4277,7 +3693,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-#                     Setup Application
+#                     Setup
 # =========================================================
 
 application = Application.builder().token(BOT_TOKEN).updater(None).build()
