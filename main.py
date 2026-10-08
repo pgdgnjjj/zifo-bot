@@ -125,14 +125,12 @@ class DataManager:
                 data.setdefault("admin_logs", [])
                 data.setdefault("apps_text", "📱 برای اتصال، از برنامه‌های زیر استفاده کن:")
 
-                # کانفیگ‌های تست (خالی)
                 data.setdefault("test_configs", {
                     "android": [],
                     "ios": [],
                     "windows": []
                 })
 
-                # عضویت اجباری
                 data.setdefault("force_join", {
                     "enabled": False,
                     "channel_id": "",
@@ -174,12 +172,9 @@ class DataManager:
             "shop_status": {"is_open": True, "closed_message": "🚫 فروشگاه بسته است."},
             "force_join": {
                 "enabled": False,
-                "channel_id": "",
-                "channel_link": "",
-                "group_id": "",
-                "group_link": "",
-                "require_channel": False,
-                "require_group": False,
+                "channel_id": "", "channel_link": "",
+                "group_id": "", "group_link": "",
+                "require_channel": False, "require_group": False,
                 "message": "🔒 برای استفاده از ربات، ابتدا در کانال و گروه ما عضو شوید:"
             }
         }
@@ -524,7 +519,6 @@ class DataManager:
             result.append({"date": day_str, "orders": len(orders), "revenue": revenue})
         return result
 
-    # 🧪 کانفیگ‌های تست
     def get_test_configs(self):
         self.data.setdefault("test_configs", {"android": [], "ios": [], "windows": []})
         return self.data["test_configs"]
@@ -558,7 +552,6 @@ class DataManager:
             return count
         return 0
 
-    # 🔒 عضویت اجباری
     def get_force_join(self):
         self.data.setdefault("force_join", {
             "enabled": False,
@@ -735,7 +728,7 @@ async def cancel(update: Update, context):
 
 
 # =========================================================
-#             🧪 تست رایگان (کاربر کانفیگ می‌گیره)
+#             🧪 تست رایگان
 # =========================================================
 
 async def test_free_menu(upd, ctx):
@@ -829,10 +822,8 @@ async def test_give_config(upd, ctx, platform):
         await safe_edit(msg, text, reply_markup=kb)
         return
 
-    # انتخاب رندوم
     chosen = random.choice(configs)
 
-    # علامت‌گذاری کاربر
     u["test_used"] = True
     dm.save_data()
 
@@ -863,7 +854,6 @@ async def test_give_config(upd, ctx, platform):
     except Exception:
         await msg.reply_text(text, reply_markup=kb)
 
-    # اطلاع به ادمین‌ها
     ud = user_display(uid, u.get("username", ""))
     for aid in dm.data["owners"] + dm.data["admins"]:
         try:
@@ -1033,7 +1023,7 @@ async def test_clear_execute(upd, ctx, platform):
 
 
 # =========================================================
-#                     بقیه کد
+#                     بقیه توابع
 # =========================================================
 
 async def show_apps(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1577,182 +1567,6 @@ async def admin_panel(upd, ctx):
             ["🔙 بازگشت"]
         ]
     await msg.reply_text("⚙️ **پنل مدیریت**", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
-
-
-async def force_join_menu(upd, ctx):
-    if isinstance(upd, CallbackQuery):
-        msg = upd.message
-        user = upd.from_user
-        await answer_cb(upd)
-        is_callback = True
-    else:
-        msg = upd.message
-        user = upd.effective_user
-        is_callback = False
-
-    if not dm.is_owner(user.id):
-        await msg.reply_text("❌ فقط مالکین دسترسی دارن.")
-        return
-
-    fj = dm.get_force_join()
-    status = "✅ فعال" if fj.get("enabled") else "❌ غیرفعال"
-
-    text = (
-        f"🔒 **مدیریت عضویت اجباری**\n━━━━━━━━━━━━━━━\n"
-        f"📊 وضعیت کلی: {status}\n\n"
-        f"📢 کانال:\n   • نیاز: {'✅' if fj.get('require_channel') else '❌'}\n   • آیدی: `{fj.get('channel_id') or 'تنظیم نشده'}`\n   • لینک: {fj.get('channel_link') or 'تنظیم نشده'}\n\n"
-        f"👥 گروه:\n   • نیاز: {'✅' if fj.get('require_group') else '❌'}\n   • آیدی: `{fj.get('group_id') or 'تنظیم نشده'}`\n   • لینک: {fj.get('group_link') or 'تنظیم نشده'}\n━━━━━━━━━━━━━━━"
-    )
-
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{'🔴 غیرفعال کن' if fj.get('enabled') else '🟢 فعال کن'}", callback_data="fj_toggle")],
-        [InlineKeyboardButton("📢 تنظیم کانال", callback_data="fj_channel")],
-        [InlineKeyboardButton("👥 تنظیم گروه", callback_data="fj_group")],
-        [InlineKeyboardButton("📝 تغییر پیام", callback_data="fj_message")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
-    ])
-
-    if is_callback:
-        await safe_edit(msg, text, reply_markup=kb)
-    else:
-        await msg.reply_text(text, reply_markup=kb)
-
-
-async def fj_toggle(upd, ctx):
-    if isinstance(upd, CallbackQuery):
-        msg = upd.message
-        await answer_cb(upd)
-    else:
-        msg = upd.message
-    fj = dm.get_force_join()
-    new_state = not fj.get("enabled", False)
-    dm.set_force_join({"enabled": new_state})
-    await answer_cb(upd, f"{'✅ فعال شد' if new_state else '❌ غیرفعال شد'}", show_alert=True)
-    await force_join_menu(upd, ctx)
-
-
-async def fj_channel_prompt(upd, ctx):
-    if isinstance(upd, CallbackQuery):
-        msg = upd.message
-        await answer_cb(upd)
-    else:
-        msg = upd.message
-    clear_states(ctx)
-    ctx.user_data['awaiting_channel_id'] = True
-    await msg.reply_text(
-        "📢 **تنظیم کانال**\n\n🔹 مرحله ۱ از ۲\n\n"
-        "آیدی عددی کانال رو بفرست:\nمثال: `-1001234567890`\n\n"
-        "💡 برای گرفتن آیدی: کانال رو به @userinfobot فوروارد کن\n\n"
-        "برای حذف کانال، بنویس: `حذف`"
-    )
-
-
-async def handle_channel_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_channel_id'):
-        return False
-    text = update.message.text.strip()
-    if text == "حذف":
-        dm.set_force_join({"channel_id": "", "channel_link": "", "require_channel": False})
-        clear_states(context)
-        await update.message.reply_text("✅ کانال حذف شد.")
-        return True
-    channel_id = text
-    if text.startswith("https://t.me/"):
-        channel_id = "@" + text.replace("https://t.me/", "")
-    context.user_data['new_channel_id'] = channel_id
-    context.user_data['awaiting_channel_id'] = False
-    context.user_data['awaiting_channel_link'] = True
-    await update.message.reply_text("✅ ثبت شد\n\n🔹 مرحله ۲ از ۲\n\nحالا لینک کانال رو بفرست:\nمثال: `https://t.me/your_channel`")
-    return True
-
-
-async def handle_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_channel_link'):
-        return False
-    link = update.message.text.strip()
-    channel_id = context.user_data.get('new_channel_id')
-    try:
-        bot_member = await context.bot.get_chat_member(channel_id, context.bot.id)
-        if bot_member.status not in ["administrator", "creator"]:
-            await update.message.reply_text("⚠️ **هشدار:** ربات توی این کانال ادمین نیست!\nادامه می‌دم ولی ممکنه کار نکنه.")
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ نتونستم چک کنم: {e}\nادامه می‌دم.")
-    dm.set_force_join({"channel_id": channel_id, "channel_link": link, "require_channel": True})
-    clear_states(context)
-    await update.message.reply_text(f"✅ **کانال تنظیم شد**\n📢 `{channel_id}`\n🔗 {link}")
-    return True
-
-
-async def fj_group_prompt(upd, ctx):
-    if isinstance(upd, CallbackQuery):
-        msg = upd.message
-        await answer_cb(upd)
-    else:
-        msg = upd.message
-    clear_states(ctx)
-    ctx.user_data['awaiting_group_id'] = True
-    await msg.reply_text(
-        "👥 **تنظیم گروه**\n\n🔹 مرحله ۱ از ۲\n\n"
-        "آیدی عددی گروه رو بفرست:\nمثال: `-1001234567890`\n\n"
-        "برای حذف گروه، بنویس: `حذف`"
-    )
-
-
-async def handle_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_group_id'):
-        return False
-    text = update.message.text.strip()
-    if text == "حذف":
-        dm.set_force_join({"group_id": "", "group_link": "", "require_group": False})
-        clear_states(context)
-        await update.message.reply_text("✅ گروه حذف شد.")
-        return True
-    group_id = text
-    if text.startswith("https://t.me/"):
-        group_id = "@" + text.replace("https://t.me/", "")
-    context.user_data['new_group_id'] = group_id
-    context.user_data['awaiting_group_id'] = False
-    context.user_data['awaiting_group_link'] = True
-    await update.message.reply_text("✅ ثبت شد\n\n🔹 مرحله ۲ از ۲\n\nحالا لینک گروه رو بفرست:")
-    return True
-
-
-async def handle_group_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_group_link'):
-        return False
-    link = update.message.text.strip()
-    group_id = context.user_data.get('new_group_id')
-    try:
-        bot_member = await context.bot.get_chat_member(group_id, context.bot.id)
-        if bot_member.status not in ["administrator", "creator", "member"]:
-            await update.message.reply_text("⚠️ ربات توی گروه نیست!\nادامه می‌دم.")
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ نتونستم چک کنم: {e}")
-    dm.set_force_join({"group_id": group_id, "group_link": link, "require_group": True})
-    clear_states(context)
-    await update.message.reply_text(f"✅ **گروه تنظیم شد**\n👥 `{group_id}`\n🔗 {link}")
-    return True
-
-
-async def fj_message_prompt(upd, ctx):
-    if isinstance(upd, CallbackQuery):
-        msg = upd.message
-        await answer_cb(upd)
-    else:
-        msg = upd.message
-    clear_states(ctx)
-    ctx.user_data['awaiting_forced_message'] = True
-    current = dm.get_force_join().get("message", "")
-    await msg.reply_text(f"📝 **تغییر پیام عضویت اجباری**\n\nمتن فعلی:\n{current}\n\nمتن جدید رو بنویس:")
-
-
-async def handle_forced_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_forced_message'):
-        return False
-    dm.set_force_join({"message": update.message.text})
-    clear_states(context)
-    await update.message.reply_text("✅ پیام تغییر کرد.")
-    return True
 
 
 async def toggle_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2399,7 +2213,7 @@ async def handle_all_balance(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # =========================================================
-#                     کد تخفیف / رفرال / سفارش / شارژ
+#                     کد تخفیف / رفرال
 # =========================================================
 
 async def coupon_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2907,9 +2721,11 @@ async def handle_dm_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('awaiting_dm_text'):
         return
     target = context.user_data.get('dm_target_user')
-    text = update.message.text
+    msg = update.message
+    text = msg.text or msg.caption or ""
+    entities = msg.entities or msg.caption_entities or []
     try:
-        await context.bot.send_message(int(target), f"📩 **از مدیریت:**\n\n{text}")
+        await context.bot.send_message(int(target), f"📩 **از مدیریت:**\n\n{text}", entities=entities)
         await update.message.reply_text("✅ ارسال شد.")
     except Exception as e:
         await update.message.reply_text(f"❌ خطا: {e}")
@@ -3208,30 +3024,284 @@ async def show_admin_logs(upd, ctx):
         await msg.reply_text(text, reply_markup=kb)
 
 
+async def force_join_menu(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        user = upd.from_user
+        await answer_cb(upd)
+        is_callback = True
+    else:
+        msg = upd.message
+        user = upd.effective_user
+        is_callback = False
+
+    if not dm.is_owner(user.id):
+        await msg.reply_text("❌ فقط مالکین.")
+        return
+
+    fj = dm.get_force_join()
+    status = "✅ فعال" if fj.get("enabled") else "❌ غیرفعال"
+
+    text = (
+        f"🔒 **مدیریت عضویت اجباری**\n━━━━━━━━━━━━━━━\n"
+        f"📊 وضعیت کلی: {status}\n\n"
+        f"📢 کانال:\n   • نیاز: {'✅' if fj.get('require_channel') else '❌'}\n   • آیدی: `{fj.get('channel_id') or 'تنظیم نشده'}`\n   • لینک: {fj.get('channel_link') or 'تنظیم نشده'}\n\n"
+        f"👥 گروه:\n   • نیاز: {'✅' if fj.get('require_group') else '❌'}\n   • آیدی: `{fj.get('group_id') or 'تنظیم نشده'}`\n   • لینک: {fj.get('group_link') or 'تنظیم نشده'}\n━━━━━━━━━━━━━━━"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{'🔴 غیرفعال کن' if fj.get('enabled') else '🟢 فعال کن'}", callback_data="fj_toggle")],
+        [InlineKeyboardButton("📢 تنظیم کانال", callback_data="fj_channel")],
+        [InlineKeyboardButton("👥 تنظیم گروه", callback_data="fj_group")],
+        [InlineKeyboardButton("📝 تغییر پیام", callback_data="fj_message")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]
+    ])
+
+    if is_callback:
+        await safe_edit(msg, text, reply_markup=kb)
+    else:
+        await msg.reply_text(text, reply_markup=kb)
+
+
+async def fj_toggle(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+    fj = dm.get_force_join()
+    new_state = not fj.get("enabled", False)
+    dm.set_force_join({"enabled": new_state})
+    await answer_cb(upd, f"{'✅ فعال شد' if new_state else '❌ غیرفعال شد'}", show_alert=True)
+    await force_join_menu(upd, ctx)
+
+
+async def fj_channel_prompt(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+    clear_states(ctx)
+    ctx.user_data['awaiting_channel_id'] = True
+    await msg.reply_text(
+        "📢 **تنظیم کانال**\n\n🔹 مرحله ۱ از ۲\n\n"
+        "آیدی عددی کانال رو بفرست:\nمثال: `-1001234567890`\n\n"
+        "برای حذف کانال، بنویس: `حذف`"
+    )
+
+
+async def handle_channel_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_channel_id'):
+        return False
+    text = update.message.text.strip()
+    if text == "حذف":
+        dm.set_force_join({"channel_id": "", "channel_link": "", "require_channel": False})
+        clear_states(context)
+        await update.message.reply_text("✅ کانال حذف شد.")
+        return True
+    channel_id = text
+    if text.startswith("https://t.me/"):
+        channel_id = "@" + text.replace("https://t.me/", "")
+    context.user_data['new_channel_id'] = channel_id
+    context.user_data['awaiting_channel_id'] = False
+    context.user_data['awaiting_channel_link'] = True
+    await update.message.reply_text("✅ ثبت شد\n\n🔹 مرحله ۲ از ۲\n\nحالا لینک کانال رو بفرست:")
+    return True
+
+
+async def handle_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_channel_link'):
+        return False
+    link = update.message.text.strip()
+    channel_id = context.user_data.get('new_channel_id')
+    dm.set_force_join({"channel_id": channel_id, "channel_link": link, "require_channel": True})
+    clear_states(context)
+    await update.message.reply_text(f"✅ **کانال تنظیم شد**\n📢 `{channel_id}`\n🔗 {link}")
+    return True
+
+
+async def fj_group_prompt(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+    clear_states(ctx)
+    ctx.user_data['awaiting_group_id'] = True
+    await msg.reply_text(
+        "👥 **تنظیم گروه**\n\n🔹 مرحله ۱ از ۲\n\n"
+        "آیدی عددی گروه رو بفرست:\nمثال: `-1001234567890`\n\n"
+        "برای حذف گروه، بنویس: `حذف`"
+    )
+
+
+async def handle_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_group_id'):
+        return False
+    text = update.message.text.strip()
+    if text == "حذف":
+        dm.set_force_join({"group_id": "", "group_link": "", "require_group": False})
+        clear_states(context)
+        await update.message.reply_text("✅ گروه حذف شد.")
+        return True
+    group_id = text
+    if text.startswith("https://t.me/"):
+        group_id = "@" + text.replace("https://t.me/", "")
+    context.user_data['new_group_id'] = group_id
+    context.user_data['awaiting_group_id'] = False
+    context.user_data['awaiting_group_link'] = True
+    await update.message.reply_text("✅ ثبت شد\n\n🔹 مرحله ۲ از ۲\n\nحالا لینک گروه رو بفرست:")
+    return True
+
+
+async def handle_group_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_group_link'):
+        return False
+    link = update.message.text.strip()
+    group_id = context.user_data.get('new_group_id')
+    dm.set_force_join({"group_id": group_id, "group_link": link, "require_group": True})
+    clear_states(context)
+    await update.message.reply_text(f"✅ **گروه تنظیم شد**\n👥 `{group_id}`\n🔗 {link}")
+    return True
+
+
+async def fj_message_prompt(upd, ctx):
+    if isinstance(upd, CallbackQuery):
+        msg = upd.message
+        await answer_cb(upd)
+    else:
+        msg = upd.message
+    clear_states(ctx)
+    ctx.user_data['awaiting_forced_message'] = True
+    current = dm.get_force_join().get("message", "")
+    await msg.reply_text(f"📝 **تغییر پیام**\n\nمتن فعلی:\n{current}\n\nمتن جدید:")
+
+
+async def handle_forced_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_forced_message'):
+        return False
+    dm.set_force_join({"message": update.message.text})
+    clear_states(context)
+    await update.message.reply_text("✅ پیام تغییر کرد.")
+    return True
+
+
+# =========================================================
+#             📢 پیام همگانی (با پشتیبانی ایموجی پرمیوم)
+# =========================================================
+
 async def broadcast_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dm.is_owner(update.effective_user.id):
         return
     clear_states(context)
     context.user_data['awaiting_broadcast'] = True
-    await update.message.reply_text("📢 متن پیام همگانی:\n(برای انصراف /cancel)")
+    await update.message.reply_text(
+        "📢 **پیام همگانی**\n\n"
+        "پیامت رو بفرست:\n"
+        "• متن (با ایموجی پرمیوم)\n"
+        "• عکس با کپشن\n"
+        "• ویدیو با کپشن\n"
+        "• فایل با کپشن\n\n"
+        "برای انصراف /cancel"
+    )
 
 
 async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    msg = update.message
     users = dm.data["users"]
     sent = 0
+    failed = 0
     sent_msgs = []
-    for uid in users:
-        try:
-            m = await context.bot.send_message(int(uid), text)
-            sent += 1
-            sent_msgs.append({"chat_id": int(uid), "message_id": m.message_id})
-        except Exception:
-            pass
+    
+    total = len(users)
+    await update.message.reply_text(f"⏳ در حال ارسال به {total} کاربر...")
+    
+    # تشخیص نوع پیام
+    if msg.photo:
+        file_id = msg.photo[-1].file_id
+        caption = msg.caption or ""
+        entities = msg.caption_entities or []
+        for uid in users:
+            try:
+                m = await context.bot.send_photo(
+                    int(uid), file_id,
+                    caption=caption,
+                    caption_entities=entities,
+                )
+                sent += 1
+                sent_msgs.append({"chat_id": int(uid), "message_id": m.message_id})
+            except Exception as e:
+                failed += 1
+                logger.error(f"Broadcast photo to {uid}: {e}")
+    elif msg.video:
+        file_id = msg.video.file_id
+        caption = msg.caption or ""
+        entities = msg.caption_entities or []
+        for uid in users:
+            try:
+                m = await context.bot.send_video(
+                    int(uid), file_id,
+                    caption=caption,
+                    caption_entities=entities,
+                )
+                sent += 1
+                sent_msgs.append({"chat_id": int(uid), "message_id": m.message_id})
+            except Exception as e:
+                failed += 1
+                logger.error(f"Broadcast video to {uid}: {e}")
+    elif msg.document:
+        file_id = msg.document.file_id
+        caption = msg.caption or ""
+        entities = msg.caption_entities or []
+        for uid in users:
+            try:
+                m = await context.bot.send_document(
+                    int(uid), file_id,
+                    caption=caption,
+                    caption_entities=entities,
+                )
+                sent += 1
+                sent_msgs.append({"chat_id": int(uid), "message_id": m.message_id})
+            except Exception as e:
+                failed += 1
+                logger.error(f"Broadcast doc to {uid}: {e}")
+    else:
+        text = msg.text or ""
+        entities = msg.entities or []
+        
+        # 🔥 تعداد ایموجی پرمیوم
+        custom_emoji_count = sum(1 for e in entities if e.type == "custom_emoji")
+        logger.info(f"📢 Broadcast: custom_emoji={custom_emoji_count}, entities={len(entities)}")
+        
+        for uid in users:
+            try:
+                m = await context.bot.send_message(
+                    int(uid), text,
+                    entities=entities,  # 🔥 ایموجی پرمیوم
+                )
+                sent += 1
+                sent_msgs.append({"chat_id": int(uid), "message_id": m.message_id})
+            except Exception as e:
+                failed += 1
+                logger.error(f"Broadcast text to {uid}: {e}")
+    
     if sent_msgs:
-        dm.add_broadcast(sent_msgs, text)
+        dm.add_broadcast(sent_msgs, msg.text or msg.caption or "")
     clear_states(context)
-    await update.message.reply_text(f"✅ به {sent} کاربر ارسال شد.")
+    
+    # 🔥 تعداد ایموجی پرمیوم
+    entities = msg.entities or msg.caption_entities or []
+    custom_emoji_count = sum(1 for e in entities if e.type == "custom_emoji")
+    
+    await update.message.reply_text(
+        f"✅ **ارسال کامل شد**\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"✅ موفق: {sent}\n"
+        f"❌ خطا: {failed}\n"
+        f"📊 کل: {total}\n"
+        f"🎨 ایموجی پرمیوم: {custom_emoji_count}"
+    )
 
 
 async def delete_last_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3269,7 +3339,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌")
             return
 
-        # چک عضویت
         if data == "check_membership":
             user_id = str(query.from_user.id)
             is_member, missing = await check_membership(context.bot, user_id)
@@ -3289,7 +3358,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer(f"❌ هنوز عضو نشدی: {' و '.join(missing_text)}", show_alert=True)
             return
 
-        # منو
         if data == "back_menu":
             await main_menu(query, context)
         elif data == "admin_back":
@@ -3313,7 +3381,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "apply_coupon":
             await apply_coupon_prompt(query, context)
 
-        # تست کاربر
         elif data == "test_menu":
             await test_free_menu(query, context)
         elif data == "test_android":
@@ -3323,7 +3390,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "test_windows":
             await test_give_config(query, context, "windows")
 
-        # تست ادمین
         elif data == "test_manage":
             await test_manage_menu(query, context)
         elif data.startswith("testm_"):
@@ -3344,7 +3410,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             platform = data[8:]
             await test_clear_execute(query, context, platform)
 
-        # عضویت اجباری
         elif data == "fj_toggle":
             await fj_toggle(query, context)
         elif data == "fj_channel":
@@ -3354,7 +3419,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "fj_message":
             await fj_message_prompt(query, context)
 
-        # کد تخفیف
         elif data == "add_coupon":
             await add_coupon_prompt(query, context)
         elif data == "del_coupon":
@@ -3364,7 +3428,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "toggle_ref":
             await toggle_ref(query, context)
 
-        # کارت‌ها
         elif data == "card_menu":
             await cards_menu(query, context)
         elif data == "card_add":
@@ -3378,7 +3441,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("card_act_"):
             await activate_card_execute(query, context, int(data.split("_")[2]))
 
-        # برنامه‌ها
         elif data == "app_menu":
             await apps_menu(query, context)
         elif data == "app_add":
@@ -3390,7 +3452,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("app_del_"):
             await del_app_execute(query, context, int(data.split("_")[2]))
 
-        # محصولات
         elif data.startswith("prod_"):
             await product_details(query, context, int(data.split("_")[1]))
         elif data.startswith("cartadd_"):
@@ -3408,7 +3469,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("confirmdel_"):
             await confirm_delete_product(query, context, int(data.split("_")[1]))
 
-        # سفارش
         elif data.startswith("orddet_"):
             await view_order_detail(query, context, data[7:])
         elif data.startswith("appr_"):
@@ -3430,7 +3490,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("clrord_"):
             await clear_orders(query, context, data[7:])
 
-        # شارژ
         elif data.startswith("topdet_"):
             await view_topup_detail(query, context, data[7:])
         elif data.startswith("apprtop_"):
@@ -3440,7 +3499,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "clrtop":
             await clear_topups(query, context)
 
-        # مالکین
         elif data == "owners_menu":
             await owners_management_menu(query, context)
         elif data == "owner_add":
@@ -3452,7 +3510,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("owner_del_"):
             await owner_delete_confirm(query, context, data[10:])
 
-        # ادمین‌ها
         elif data == "admins_menu":
             await admins_management_menu(query, context)
         elif data == "admin_add":
@@ -3577,14 +3634,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in MAIN_MENU_BUTTONS:
         clear_states(context)
 
-    # 🔒 عضویت اجباری - قبل از هر کاری
+    # 🔒 اگه منتظر پیام همگانی هستیم، اول اینو چک کن
+    if context.user_data.get('awaiting_broadcast') and dm.is_owner(uid):
+        await handle_broadcast(update, context); return
+
     if not dm.is_admin(uid) and not text.startswith("/"):
         is_member, missing = await check_membership(context.bot, uid)
         if not is_member:
             await show_force_join_message(update, context)
             return
 
-    # State ها
     if context.user_data.get('awaiting_test_config_add'):
         await handle_test_config_add(update, context); return
     if context.user_data.get('awaiting_channel_id'):
@@ -3623,8 +3682,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_admin_edit(update, context); return
     if context.user_data.get('awaiting_add_owner'):
         await handle_owner_edit(update, context); return
-    if context.user_data.get('awaiting_broadcast'):
-        await handle_broadcast(update, context); return
     if (context.user_data.get('awaiting_product_name') or
         context.user_data.get('awaiting_product_price') or
         context.user_data.get('awaiting_product_stock') or
@@ -3702,6 +3759,7 @@ application.add_handler(CommandHandler("cancel", cancel))
 application.add_handler(CallbackQueryHandler(button_handler))
 application.add_handler(MessageHandler(filters.PHOTO, message_handler))
 application.add_handler(MessageHandler(filters.Document.ALL, message_handler))
+application.add_handler(MessageHandler(filters.VIDEO, message_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
 flask_app = Flask(__name__)
